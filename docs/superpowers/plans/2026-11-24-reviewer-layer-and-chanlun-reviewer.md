@@ -954,6 +954,8 @@ git commit -m "feat: reviewer contract with ReviewVerdict and validation"
   - `agaistock.reviewers.registry.instantiate(spec: dict) -> Reviewer`，按 `module` 路径动态导入并取类 `Reviewer`。
   - `agaistock.reviewers.engine.run_reviews(verdicts: list[ReviewVerdict], conn, observation_id: str) -> list[dict]`，**逐个调用、失败隔离、全部落库**，返回落库后的 verdict 字典列表（含 `status="error"` 的失败项）。
   - `agaistock.reviewers.engine.run_one(reviewer, ctx: ReviewContext) -> ReviewVerdict`，异常时返回 `status="error"` 的 verdict 而非抛出。
+  - `agaistock.reviewers.engine.run_reviewers(reviewers: list, ctx: ReviewContext) -> list[ReviewVerdict]`，依次执行所有点评师，返回全部结果（含失败项）。
+  - `agaistock.reviewers.engine.persist(conn, observation_id: str, verdicts: list[ReviewVerdict]) -> list[dict]`，把 verdict 落库，返回落库后的字典列表。
 
 - [ ] **Step 1: 写失败的测试**
 
