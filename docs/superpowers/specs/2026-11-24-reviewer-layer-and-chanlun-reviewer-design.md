@@ -141,13 +141,15 @@ D:\workroom\agaistock\
 │   │   ├── reviewer.py                  ← Reviewer 实现（入口）
 │   │   ├── rules.py                     ← 纯规则层：结构 + 观察卡 → findings（可单测）
 │   │   ├── wording.py                   ← LLM 措辞层
-│   │   ├── adapters/
-│   │   │   └── tdx_rows_to_em.py        ← tdx_kline Rows → 东财格式（重写，见 §9.3）
 │   │   └── vendor/chanlun-core/         ← 上游拷贝，保持可追溯
 │   │       ├── scripts/                 ← chan_analyze.py / chan_multi_level.py / ...
 │   │       └── references/              ← glossary.md / tdx-mcp-reference.md
 │   └── ...
 ├── src/agaistock/
+│   ├── providers/
+│   │   ├── tdx_rows_to_em.py            ← tdx_kline Rows → 东财格式（重写，见 §9.3）
+│   │   ├── tdx.py                       ← 通达信取数（含后复权口径收口）
+│   │   └── mcode_cli.py                 ← 连接器调用桥
 │   ├── reviewers/
 │   │   ├── contract.py                  ← ReviewVerdict / ReviewContext 定义
 │   │   ├── registry.py                  ← 静态注册表 + 发现
@@ -431,7 +433,7 @@ ALTER TABLE observations ADD COLUMN deleted_at TEXT;   -- NULL = 存活
 ```
 tdx_kline(code, setcode, period=5/4/2, wantNum=500)     ← 通达信 MCP，主数据源
       ↓  （三个级别，各 500 根 —— 对齐模式，见纪律四）
-adapters/tdx_rows_to_em.py                                ← Rows → 东财格式（升序）
+providers/tdx_rows_to_em.py                                ← Rows → 东财格式（升序，7 列）
       ↓
 vendor/chanlun-core/scripts/chan_analyze.py --level week|day|m30
       ↓
