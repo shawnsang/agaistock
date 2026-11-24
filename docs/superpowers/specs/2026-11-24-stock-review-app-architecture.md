@@ -511,7 +511,7 @@ class MarketDataProvider(Protocol):
 
 ### 6.5 模型与 Provider 配置
 
-**业务内核自带 `config/providers.json`，不读宿主的 `config.yaml`。**
+**业务内核将自带 `config/providers.json`（下一轮交付；本轮 `config/` 下只有 `reviewers.json` 与 `scoring.json`），不读宿主的 `config.yaml`。**
 理由：D3 决定业务内核不依赖任何宿主的私有文件结构，否则"换宿主不重写"的承诺就不成立。
 
 ```json
@@ -784,7 +784,7 @@ env:         { AGAISTOCK_HOME: "D:\\workroom\\agaistock" }
 - 观察记录**只追加不修改**，修订走新版本行 + `supersedes_id`（§7）
 - 评分五维**权重做成 `config/scoring.json`**，默认值见 §5.3
 - ASR 与分析模型**分两条独立通道**（§5.0）；DeepSeek 只能做分析模型，不能做 ASR
-- 业务内核**自带 provider 配置**，不读宿主 `config.yaml`（§6.5）
+- 业务内核**自带 provider 配置**（`config/providers.json`，下一轮交付），不读宿主 `config.yaml`（§6.5）
 - **P0 主数据源 = 通达信 MCP**（D5、§6.3），无需再比较 iFinD / Tushare
 - **seven-dim 取数走自建等价 MCP**，底层用通达信实现（§6.4）
 - **UI 主线 = Mini App**（D10），不再回到「纯对话驱动」；垂直切片已跑通（§4.3.1）

@@ -6282,7 +6282,7 @@ Expected: exit 0
 然后用 `miniapp` 工具：
 
 ```
-miniapp { action: "publish", pluginId: "agaistock" }
+miniapp { action: "publish", pluginId: "agaistock", sourcePath: "<repo>/miniapps/agaistock" }
 miniapp { action: "open",    pluginId: "agaistock" }
 ```
 
@@ -6315,7 +6315,7 @@ Expected: runtime `running`，open 成功。
 - [x] **Step 4: 验证重启恢复**
 
 ```bash
-miniapp { action: "publish", pluginId: "agaistock" }
+miniapp { action: "publish", pluginId: "agaistock", sourcePath: "<repo>/miniapps/agaistock" }
 miniapp { action: "open",    pluginId: "agaistock" }
 ```
 
@@ -6350,7 +6350,7 @@ git commit -m "docs: record end-to-end verification results for reviewer layer"
 ```
 
 > **不要用 `git add -A`**（Global Constraint 14）：实测过程中可能有并行子代理的中间文件，
-> 一把全加会把别人的半成品一起提交。只 add 上面这两个路径。
+> 一把全加会把别人的半成品一起提交。只 add 上面这三个路径。
 
 > **实测前置**：本任务的 Step 2/3/4 必须在 **Task 17** 之后跑。
 > 首次实测（2026-11-24）暴露了两个阻塞缺陷 —— 安装后的插件包**不含 Python 内核**，
@@ -6948,7 +6948,7 @@ Expected: Node 48 通过（pipeline 23 + render 10 + api 15）；Python 140 通�
 - [ ] **Step 9: 发布并在安装副本上验收**
 
 ```
-miniapp { action: "publish", pluginId: "agaistock" }
+miniapp { action: "publish", pluginId: "agaistock", sourcePath: "<repo>/miniapps/agaistock" }
 miniapp { action: "open",    pluginId: "agaistock" }
 ```
 

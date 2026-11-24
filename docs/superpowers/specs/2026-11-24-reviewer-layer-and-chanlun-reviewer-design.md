@@ -152,8 +152,10 @@ D:\workroom\agaistock\
 │   │       ├── signals.py                ← proposed_invalidation / horizon_hint 生成
 │   │       ├── wording.py                ← LLM 措辞层
 │   │       └── vendor/chanlun-core/      ← 上游拷贝，保持可追溯（只读不改）
-│   │           ├── scripts/              ← chan_analyze.py / chan_multi_level.py / ...
-│   │           └── references/           ← glossary.md / tdx-mcp-reference.md
+│   │           ├── SKILL.md                ← 上游 skill 说明（25 条纪律的来源）
+│   │           ├── scripts/                ← chan_analyze.py / chan_multi_level.py / ...
+│   │           ├── references/             ← glossary.md / tdx-mcp-reference.md
+│   │           └── templates/              ← 上游报告模板与 inline_data 模板
 │   ├── llm/client.py                    ← LLM 措辞调用（§10）
 │   ├── scoring.py                       ← 维度聚合（§5）
 │   ├── horizon.py                       ← 观察期（§6）
@@ -161,16 +163,21 @@ D:\workroom\agaistock\
 │   ├── cli.py                           ← 唯一对外入口（stdin/stdout JSON）
 │   └── storage/
 │       └── db.py                        ← SQLite，含 reviews 表 + deleted_at
+│   （每个包目录都另有 `__init__.py`：agaistock / llm / providers / reviewers /
+│     skills / skills/anchor_chanlun / storage）
 ├── config/
 │   ├── reviewers.json                   ← 点评师注册表（§3.2）
 │   └── scoring.json                     ← 五维与权重（§5.1）
 ├── tools/sync-kernel.py                 ← 内核随包复制 + 漂移守卫（见 §16.2）
 └── miniapps/agaistock/                  ← Mini App（§8）
+    ├── miniapp/miniapp.json             ← Mini App 清单
     ├── miniapp/node/server.mjs          ← HTTP 路由 + 内核子进程桥
     ├── miniapp/client/index.html        ← 页面
     ├── miniapp/client/render.mjs        ← 渲染层（点评 / 评分 / 观察期 / 观察库）
     ├── src/agaistock/**、config/**       ← 内核与配置的逐字节副本（随包走）
-    └── test/*.test.mjs                  ← node --test 用例
+    ├── test/*.test.mjs                  ← node --test 用例
+    ├── package.json、icon.png、.minimax-plugin/plugin.json   ← 插件打包清单与图标
+    └── data/                            ← ⚠️ 缠论分析缓存（运行时生成，不随包发布，见 §16.4）
 ```
 
 **与初稿的三处偏离（以实现为准）**：
@@ -702,9 +709,9 @@ ReviewVerdict
 | 解析 | 看多、信心 70%、**依据 5 条**（事实 2 · 假设 3）、证伪条件「钨价跌回去年年底的水平」 |
 | 落库 | 结构化观察写入 SQLite，`evidence_json` 5 项、`invalidation_json` 1 项（**逐字段校验后落库**，不是自由文本） |
 | 点评 | `anchor-chanlun` 产出 6 条 finding |
-| 评分 | **92 / 100**；被审维度只有「证伪条件 91（权重 0.25）」+「位置与时机 94（权重 0.15）」，**权重和 0.40** |
+| 评分 | **92 / 100**（UI 取整显示；**精确值 92.125** = (91×0.25 + 94×0.15) / 0.40）；被审维度只有「证伪条件 91（权重 0.25）」+「位置与时机 94（权重 0.15）」，**权重和 0.40** |
 | 无人点评 | 事实锚定 / 逻辑链条 / 一致性 三维标 `no_reviewer`，**不按 0 分计**，不进分母 |
-| 观察期 | 2026-12-01，档位 **event**，rationale「存在明确催化剂（明年上半年产量翻倍），按事件驱动锚定」 |
+| 观察期 | 2026-12-01，档位 **event**，rationale「存在明确催化剂（明年上半年产量翻倍），按事件驱动锚定」（落库实际值带点评师前缀：`anchor-chanlun: …`） |
 | 到期检查项 | 6 条，**每条都带 rationale** |
 | 删除 | 确认弹窗 → `DELETE /api/observations/<id>` → 200；DB 层 `deleted_at` 置位，**行未被物理删除** |
 | 重启恢复 | `publish` 重解包 + runtime 重启后，观察行**仍在**（依据 / 信心 / 证伪条件齐全），已删行仍隐藏 |
@@ -719,7 +726,7 @@ ReviewVerdict
 |---|---|---|
 | 1 | **宿主把插件包解到临时目录再跑**（实测 `C:\Users\shawn\AppData\Local\Temp\mavis-miniapp-XXXXXX\package\`），仓库里的 `src/` 根本不在运行路径上 | 内核必须随包走：采用「复制 + 逐字节漂移守卫」（`tools/sync-kernel.py` + `tests/test_kernel_vendor.py`），而不是把内核搬进插件包（会牵动 pyproject / editable 安装 / `repo_root()` 语义 / 数据目录位置，成本远大于收益） |
 | 2 | **`python -S` 是必需项，不是优化**：editable 安装的 meta-path finder 优先级高于 `PYTHONPATH`，不加 `-S` 时包内 `src/` 会被已安装的包截胡 | 顺带把「零第三方依赖」从口号变成运行时硬约束 |
-| 3 | **运行数据必须落 `context.dataDir`**（实测 `…\.minimax\v2\plugin-data\liveboards\agaistock\`），插件目录是安装产物、可能被覆盖或只读 | 数据库路径由 `server.mjs` 传入；实测插件包内**不含任何 `.db` 文件** |
+| 3 | **数据库必须落 `context.dataDir`**（实测 `…\.minimax\v2\plugin-data\liveboards\agaistock\`），插件目录是安装产物、可能被覆盖或只读 | 数据库路径由 `server.mjs` 传入；实测插件包内**不含任何 `.db` 文件`。⚠️ **只有数据库如此**：缠论分析缓存（上游脚本产出的 K 线与结构 JSON）仍写在**插件包自己的 `data/` 下**（`cli.py` 用 `repo_root()/"data"`，安装副本里 `repo_root()` 就是包根）→ 每次重装都要重算，包目录若只读则 `work_dir.mkdir` 直接失败。**见 §16.4 首条** |
 | 4 | **`miniapp restart` 不能更新已安装副本**，只会重启旧副本 | 更新已安装的 Mini App 必须 `miniapp publish` 再 `open`；实测首次 publish 前 `/render.mjs` 404、`/api/observations` 还返回旧 JSON 库结构 |
 
 ### 16.3 实测修掉的缺陷（本轮新增任务）
@@ -734,9 +741,16 @@ ReviewVerdict
 
 ### 16.4 本轮不做、留给下一轮
 
+- **缠论分析缓存仍写在插件包里**：数据库已按 §16.2 第 3 条迁到 `context.dataDir`，但缓存走的是
+  `config.repo_root()/"data"`（`cli.py`）→ 安装副本里就是**包根下的 `data/`**。后果有两条：
+  ①每次 `miniapp publish` 重装后缓存丢失、结构重算（实测安装副本 `package/data/chanlun/002378/`
+  下有 9 个运行时生成的文件，`data/` 已被 `.gitignore` 忽略，不随包发布）；
+  ②若插件包以**只读**方式安装，`work_dir.mkdir(parents=True, exist_ok=True)` 会直接抛错 →
+  点评师整体失败，正是 Task 17 想根除的那类「内核失败被隐藏」。
+  修法与数据库对称：Node 侧再传一个 `AGAISTOCK_DATA_DIR`，CLI 用它替代 `repo_root()/"data"`。
 - **观察版本链（`supersedes_id`）**：§6.3 要求「采纳」产生新版本行 + supersedes 关系，当前存储模型没有版本链，直接改数组会破坏「观察记录只追加不修改」的不变量 → **「采纳」按钮本轮禁用**并写明原因；启用「采纳」的前提是先建版本链。
 - `contract.py` 的 bool delta / 浅拷贝 / `duration_ms` 类型收紧
 - `engine.py` 的错误归因与失败路径丢字段
-- `persist()` 两条路径缺「提交进仓库」的测试锁定
+- `persist()` 的**两条落库路径**（正常落库 / 占位→`status="error"` verdict）缺「提交进仓库」的测试锁定
 - `src/agaistock/mcp/` 的 MCP 工具暴露
 - 上游 `resonance` / `window_alignment` / `key_levels` 未接入（设计级，下一轮）
