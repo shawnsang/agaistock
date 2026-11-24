@@ -170,6 +170,33 @@ def cmd_delete(args) -> int:
         conn.close()
 
 
+def _force_utf8_stdio() -> None:
+    """管道场景强制 UTF-8，终端场景只放宽 errors。
+
+    Windows 中文机器上 Python 的 stdout 编码是 GBK（控制台代码页）。
+    CLI 用 print() 输出 JSON 时，遇到一个 GBK 编不出来的字符（实测：连接器
+    输出里的 U+FFFD）就会抛 UnicodeEncodeError —— 用户看到的是「点评失败」，
+    整轮点评全废。
+
+    - **管道**（stdout 不是 TTY）：JSON 是给 Node 侧解析的机器间通道，
+      必须 UTF-8，不能受控制台代码页影响。
+    - **终端**（是 TTY）：保留控制台编码（否则中文会变乱码），
+      只把 errors 放宽成 replace —— 宁可显示一个替换字符，也不能崩。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            if stream.isatty():
+                reconfigure(errors="replace")
+            else:
+                reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            # 流已关闭或不支持重配置：不能因此让命令失败
+            pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agaistock")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -204,6 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

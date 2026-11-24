@@ -1,6 +1,23 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from agaistock import config
+
+
+def with_config(filename, content, func):
+    """把 config 的仓库根临时指向一个只含指定配置文件的临时目录。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "config").mkdir()
+        (root / "config" / filename).write_text(content, encoding="utf-8")
+        original = config.repo_root
+        config.repo_root = lambda: root
+        try:
+            return func()
+        finally:
+            config.repo_root = original
 
 
 class ConfigTests(unittest.TestCase):
@@ -23,6 +40,34 @@ class ConfigTests(unittest.TestCase):
 
     def test_repo_root_contains_config_dir(self):
         self.assertTrue((config.repo_root() / "config" / "scoring.json").is_file())
+
+    def test_non_dict_top_level_raises_value_error(self):
+        # 顶层是数组时不能抛 AttributeError，要给可读的 ValueError。
+        with self.assertRaises(ValueError):
+            with_config("scoring.json", "[1, 2, 3]", config.load_scoring)
+
+    def test_scoring_missing_dimensions_raises(self):
+        with self.assertRaises(ValueError):
+            with_config("scoring.json", '{"other": 1}', config.load_scoring)
+
+    def test_scoring_dimension_missing_field_raises(self):
+        payload = json.dumps({"dimensions": [{"name": "事实锚定"}]})
+        with self.assertRaises(ValueError):
+            with_config("scoring.json", payload, config.load_scoring)
+
+    def test_reviewers_missing_registry_raises(self):
+        with self.assertRaises(ValueError):
+            with_config("reviewers.json", '{"other": 1}', config.load_reviewers)
+
+    def test_reviewer_missing_field_raises(self):
+        payload = json.dumps({"reviewers": [{"id": "anchor-chanlun"}]})
+        with self.assertRaises(ValueError):
+            with_config("reviewers.json", payload, config.load_reviewers)
+
+    def test_empty_reviewer_registry_fails_fast(self):
+        # 空注册表 = 产品核心功能整体失效，必须报错而不是静默返回 []。
+        with self.assertRaises(ValueError):
+            with_config("reviewers.json", '{"reviewers": []}', config.load_reviewers)
 
 
 if __name__ == "__main__":

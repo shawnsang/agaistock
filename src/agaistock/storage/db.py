@@ -128,7 +128,7 @@ def list_observations(conn: sqlite3.Connection, include_deleted: bool = False) -
     sql = "SELECT * FROM observations"
     if not include_deleted:
         sql += " WHERE deleted_at IS NULL"
-    sql += " ORDER BY created_at DESC"
+    sql += " ORDER BY created_at DESC, rowid DESC"
     return [dict(row) for row in conn.execute(sql)]
 
 
@@ -142,6 +142,15 @@ def soft_delete_observation(conn: sqlite3.Connection, observation_id: str) -> bo
 
 
 def insert_review(conn: sqlite3.Connection, observation_id: str, verdict: dict[str, Any]) -> str:
+    """落一条点评结论。
+
+    reviewer_id / reviewer_version / status 是**必填**的：它们不是「有则存之」的可选列 ——
+    latest_reviews 靠 reviewer_id 分组取最新一版，空的 reviewer_id 会分出一个
+    伪分组；空的 status 会让「这条点评成功还是失败」无从判断。
+    """
+    for field in ("reviewer_id", "reviewer_version", "status"):
+        if not str(verdict.get(field, "") or "").strip():
+            raise ValueError(f"点评结论缺少必填字段 {field}: {verdict.get('reviewer_id', '')}")
     review_id = _new_id("rev")
     conn.execute(
         """INSERT INTO reviews
@@ -151,10 +160,10 @@ def insert_review(conn: sqlite3.Connection, observation_id: str, verdict: dict[s
         (
             review_id,
             observation_id,
-            verdict.get("reviewer_id", ""),
-            verdict.get("reviewer_version", ""),
+            verdict["reviewer_id"],
+            verdict["reviewer_version"],
             verdict.get("ran_at", ""),
-            verdict.get("status", ""),
+            verdict["status"],
             int(verdict.get("duration_ms") or 0),
             json.dumps(verdict, ensure_ascii=False),
             _now(),
@@ -197,26 +206,35 @@ def latest_reviews(conn: sqlite3.Connection, observation_id: str) -> list[dict]:
 def insert_adjustment_factors(
     conn: sqlite3.Connection, symbol: str, factors: list[dict[str, Any]]
 ) -> int:
-    """写入复权因子；同一 (symbol, ex_date) 重复写入覆盖。"""
+    """写入复权因子；同一 (symbol, ex_date) 重复写入覆盖。
+
+    任何一条失败都必须回滚：否则已写入的部分会留在事务里，
+    被之后无关的 commit 一起提交 —— 复权因子表变成半截数据，
+    而复权价是后复权口径的地基。
+    """
     fetched_at = _now()
-    for item in factors:
-        conn.execute(
-            """INSERT INTO adjustment_factors
-               (symbol, ex_date, factor, constant, fetched_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(symbol, ex_date) DO UPDATE SET
-                   factor = excluded.factor,
-                   constant = excluded.constant,
-                   fetched_at = excluded.fetched_at""",
-            (
-                str(symbol),
-                str(item["ex_date"]),
-                float(item["factor"]),
-                float(item["constant"]),
-                fetched_at,
-            ),
-        )
-    conn.commit()
+    try:
+        for item in factors:
+            conn.execute(
+                """INSERT INTO adjustment_factors
+                   (symbol, ex_date, factor, constant, fetched_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(symbol, ex_date) DO UPDATE SET
+                       factor = excluded.factor,
+                       constant = excluded.constant,
+                       fetched_at = excluded.fetched_at""",
+                (
+                    str(symbol),
+                    str(item["ex_date"]),
+                    float(item["factor"]),
+                    float(item["constant"]),
+                    fetched_at,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return len(factors)
 
 

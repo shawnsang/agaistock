@@ -115,7 +115,7 @@ export function runKernel(args, options = {}) {
   const pythonPath = options.pythonPath || KERNEL_SRC;
   const dbPath = options.dbPath || '';
   return new Promise((resolve) => {
-    const env = { ...process.env, PYTHONPATH: pythonPath };
+    const env = { ...process.env, PYTHONPATH: pythonPath, PYTHONIOENCODING: 'utf-8' };
     if (dbPath) env.AGAISTOCK_DB = dbPath;
     // **必须带 `-S`**：editable 安装（`pip install -e .`）注册的是 meta-path finder，
     // 优先级**高于** PYTHONPATH —— 实测开发机上不加 `-S` 时 `import agaistock`
@@ -126,6 +126,7 @@ export function runKernel(args, options = {}) {
     const child = spawn('python', ['-S', '-m', 'agaistock.cli', ...args], {
       cwd,
       env,
+      encoding: 'utf8',
     });
     let stdout = '';
     let stderr = '';

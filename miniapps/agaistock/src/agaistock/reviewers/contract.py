@@ -168,6 +168,8 @@ def validate_verdict(verdict: ReviewVerdict, dimensions: list[str]) -> list[str]
         errors.append(f"status 非法: {verdict.status!r}，允许 {STATUSES}")
     if not verdict.reviewer_id:
         errors.append("reviewer_id 为空")
+    if not verdict.reviewer_version:
+        errors.append("reviewer_version 为空")
     for index, finding in enumerate(verdict.findings):
         if finding.severity not in SEVERITIES:
             errors.append(f"findings[{index}].severity 非法: {finding.severity!r}")

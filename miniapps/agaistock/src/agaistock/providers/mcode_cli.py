@@ -32,6 +32,21 @@ def _looks_like_missing_cli(stderr: str) -> bool:
     return any(marker.lower() in lowered for marker in _MISSING_CLI_MARKERS)
 
 
+def _decode_output(raw: bytes) -> str:
+    """解码连接器输出：先严格 UTF-8，再 GBK，最后才替换。
+
+    `errors="replace"` 会把非法字节变成 U+FFFD，而 **U+FFFD 在 GBK 控制台里
+    编不出来** —— CLI 用 print() 输出 JSON 时会直接抛 UnicodeEncodeError，
+    整轮点评全废（Task 16 实测）。所以这里宁可多试一种编码，也不要产出 U+FFFD。
+    """
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def call_connector(tool: str, args: dict, timeout: int = 180) -> str:
     """调用一个连接器工具，返回其 text 字段内容。"""
     with tempfile.TemporaryDirectory() as tmp:
@@ -52,9 +67,6 @@ def call_connector(tool: str, args: dict, timeout: int = 180) -> str:
             result = subprocess.run(
                 command,
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 timeout=timeout,
                 shell=True,
             )
@@ -63,13 +75,14 @@ def call_connector(tool: str, args: dict, timeout: int = 180) -> str:
                 "未找到 mcode-tools CLI；请确认 MCode 运行时在 PATH 中"
             ) from exc
 
+    stdout = _decode_output(result.stdout or b"").strip()
+    stderr = _decode_output(result.stderr or b"").strip()
+
     if result.returncode != 0:
-        stderr = (result.stderr or "").strip()
         if _looks_like_missing_cli(stderr):
             raise MCodedToolsMissing("未找到 mcode-tools CLI；请确认 MCode 运行时在 PATH 中")
         raise RuntimeError(f"连接器 {tool} 调用失败(exit={result.returncode}): {stderr[:500]}")
 
-    stdout = (result.stdout or "").strip()
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError as exc:

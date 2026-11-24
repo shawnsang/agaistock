@@ -55,6 +55,13 @@ def _trading_days_later(start: date, offset: int) -> date:
     return current
 
 
+def _next_trading_day(day: date) -> date:
+    """把日期推进到下一个交易日（周末顺延；节假日未处理，仅作近似）。"""
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    return day
+
+
 def _trading_days_between(start: date, end: date) -> int:
     """start 之后到 end（含）之间的交易日数，与 `_trading_days_later` 同口径。
 
@@ -98,7 +105,10 @@ def plan(
 
     start_date = date.fromisoformat(start)
     if review_at:
-        chosen = date.fromisoformat(review_at)
+        # 先推进到交易日再算偏移：结算日落在周末毫无意义。
+        # 而且推进后偏移可能冲出 allowed —— 下面那条回退分支会把它收回来，
+        # 保证 review_at 既是非交易日、也一定落在 allowed_window 之内。
+        chosen = _next_trading_day(date.fromisoformat(review_at))
         # 用**交易日**偏移校验，不要用日历日差 —— 档位里的天数是交易日偏移。
         offset = _trading_days_between(start_date, chosen)
         if allowed and offset not in allowed:

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 
 def repo_root() -> Path:
@@ -14,10 +13,20 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def _load_json(relative_path: str) -> Any:
+def _load_json(relative_path: str) -> dict:
+    """读仓库内的 JSON 配置。
+
+    顶层不是 JSON 对象时要给**可读**的错：直接 `.get()` 会抛 AttributeError，
+    用户看到的是一段没有上下文的栈回溯，而不是「配置文件坏了」。
+    """
     path = repo_root() / relative_path
     with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{relative_path} 顶层必须是 JSON 对象，实际是 {type(data).__name__}"
+        )
+    return data
 
 
 def load_scoring() -> dict:
@@ -38,6 +47,10 @@ def load_reviewers() -> list[dict]:
     reviewers = data.get("reviewers")
     if not isinstance(reviewers, list):
         raise ValueError("config/reviewers.json 缺少 reviewers")
+    if not reviewers:
+        # 空注册表 = 产品核心功能整体失效。静默返回 [] 会让每条观察都
+        # 「无人点评」，看起来像正常结果 —— 必须 fail fast。
+        raise ValueError("config/reviewers.json 的 reviewers 为空：没有点评师就没有点评")
     for item in reviewers:
         for key in ("id", "enabled", "module", "weight"):
             if key not in item:

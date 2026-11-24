@@ -244,3 +244,16 @@ test('runKernel resolves the kernel from the plugin bundle, not the repo', () =>
   assert.match(source, /const PLUGIN_ROOT = join\(import\.meta\.dirname, '\.\.', '\.\.'\)/);
   assert.match(source, /const KERNEL_SRC = join\(PLUGIN_ROOT, 'src'\)/);
 });
+
+test('paths outside the whitelist still return 404', async () => {
+  // 「只白名单这一个文件」是本服务的安全不变量：换成通用静态服务就会路径穿越。
+  for (const path of ['/index.html', '/client/render.mjs', '/etc/passwd', '/render.mjs/']) {
+    const response = new FakeResponse();
+    await handleRoute(
+      makeRequest('GET', path),
+      response,
+      { renderModule: 'export const renderScore = () => "";\n', kernel: fakeKernel({}) },
+    );
+    assert.equal(response.statusCode, 404, `${path} 必须 404`);
+  }
+});

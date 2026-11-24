@@ -173,6 +173,37 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["symbol"], "600519")
 
+    def test_adjustment_factor_write_rolls_back_on_failure(self):
+        # 第二条因子缺 ex_date → 整体失败，第一条也不能留在事务里。
+        conn = make_conn()
+        with self.assertRaises(KeyError):
+            db.insert_adjustment_factors(conn, "002378", [
+                {"ex_date": "2026-01-01", "factor": 1.0, "constant": 0.0},
+                {"factor": 1.0, "constant": 0.0},
+            ])
+        count = conn.execute("SELECT COUNT(*) FROM adjustment_factors").fetchone()[0]
+        self.assertEqual(count, 0, "失败后必须回滚，不能留下半截数据")
+
+    def test_insert_review_rejects_empty_reviewer_id(self):
+        conn = make_conn()
+        with self.assertRaises(ValueError):
+            db.insert_review(conn, "obs_1", {
+                "reviewer_id": "", "reviewer_version": "0.1.0", "status": "ok",
+            })
+
+    def test_list_observations_tiebreak_is_stable(self):
+        # 两条 created_at 完全相同：顺序必须确定（后插入的在前）。
+        conn = make_conn()
+        for index in range(2):
+            db.insert_observation(conn, {
+                "id": f"obs_{index}", "symbol": "002378", "name": "x",
+                "created_at": "2026-11-24T10:00:00+00:00", "direction": "bullish",
+            })
+        first = [row["id"] for row in db.list_observations(conn)]
+        second = [row["id"] for row in db.list_observations(conn)]
+        self.assertEqual(first, second)
+        self.assertEqual(first, ["obs_1", "obs_0"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -141,6 +141,22 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(contract.validate_verdict(verdict, ["位置与时机"]), [])
 
+    def test_empty_reviewer_version_is_rejected(self):
+        verdict = contract.ReviewVerdict(
+            reviewer_id="anchor-chanlun",
+            reviewer_version="",
+            ran_at="2026-11-24T07:30:00Z",
+            status="ok",
+            duration_ms=0,
+            data_refs=[],
+            findings=[],
+            proposed_invalidation=[],
+            horizon_hint=None,
+            caveats=[],
+        )
+        errors = contract.validate_verdict(verdict, ["位置与时机"])
+        self.assertTrue(any("reviewer_version" in err for err in errors))
+
 
 if __name__ == "__main__":
     unittest.main()

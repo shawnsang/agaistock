@@ -92,6 +92,39 @@ class CliTests(unittest.TestCase):
                 cli.main(["list", "--db", "unused.db", "--json"])
         conn.close.assert_called_once_with()
 
+    def test_json_output_survives_unencodable_char(self):
+        """Windows 中文机器上 stdout 是 GBK：输出里有一个 GBK 编不出来的字符时，
+        整条命令不能崩。"""
+        import subprocess
+        import sys
+        from agaistock.storage import db
+
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "t.db"
+            conn = db.connect(db_path)
+            db.migrate(conn)
+            db.insert_observation(conn, {
+                "symbol": "002378",
+                "name": "章\ufffd源钨业",
+                "direction": "bullish",
+                "thesis": "含替换字符的主张\ufffd",
+                "raw_text": "原始文本",
+            })
+            conn.close()
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(repo_root / "src")
+            env["PYTHONIOENCODING"] = ""  # 故意清掉，逼 CLI 自己处理
+            result = subprocess.run(
+                [sys.executable, "-m", "agaistock.cli", "list", "--db", str(db_path), "--json"],
+                cwd=repo_root, env=env, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(len(payload["items"]), 1)
+            self.assertIn("\ufffd", payload["items"][0]["name"])
+
 
 if __name__ == "__main__":
     unittest.main()

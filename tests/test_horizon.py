@@ -111,6 +111,23 @@ class HorizonTests(unittest.TestCase):
         ))
         self.assertEqual(result["allowed_window"][1], "2026-12-08")
 
+    def test_explicit_review_at_on_weekend_lands_on_trading_day(self):
+        # 2026-11-29 是周日：结算日不能落在非交易日。
+        # 推进到交易日后偏移可能冲出 allowed —— 回退分支必须把它收回来，
+        # 保证 review_at 既是非交易日、也落在 allowed_window 之内。
+        from datetime import date
+        plan_result = plan(
+            {"symbol": "002378", "thesis": "t"},
+            [verdict_with_tier("a", "short")],
+            start="2026-11-20",
+            review_at="2026-11-29",
+        )
+        chosen = date.fromisoformat(plan_result["review_at"])
+        self.assertLess(chosen.weekday(), 5, "review_at 不能落在周末")
+        start, end = plan_result["allowed_window"]
+        self.assertGreaterEqual(chosen, date.fromisoformat(start))
+        self.assertLessEqual(chosen, date.fromisoformat(end))
+
 
 if __name__ == "__main__":
     unittest.main()

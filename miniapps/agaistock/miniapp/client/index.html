@@ -650,6 +650,8 @@
               obsCount.textContent = items.length;
               runtimeState.count = items.length;
               renderChip();
+              // 内核恢复后要把上一次的错误文案清掉，否则会一直显示旧错误。
+              obsEmpty.textContent = '还没有观察记录。';
               if (!items.length) {
                 obsEmpty.classList.remove('hidden');
                 obsTableWrap.classList.add('hidden');
