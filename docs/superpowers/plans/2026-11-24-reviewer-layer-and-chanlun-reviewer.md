@@ -9031,6 +9031,424 @@ git commit -m "fix: guard the kernel runtime paths with behavioural assertions" 
 
 ---
 
+### Task 20 · fix round 3 — 堵住「默认实现」这条盲区 + 纠正来源说明的方向
+
+> **来源**：Task 20 fix round 2 的 scoped 复审（verifier）—— **PASS-WITH-MINORS**，
+> 0 Critical，但有 **3 条 Important + 2 条 Minor + 2 条 Nit**。
+> 控制器已**独立复现全部 3 条 Important**（自己的变异脚本 + 自己的 `.pyc` 来源链实测），
+> 结论与评审方一致。
+
+> **控制器已预验证本节（「先红后绿」）**：把本节的改动落到沙盒副本
+> （`.tmp\task20-fix3\sandbox\agaistock\`）实跑，用**加固后**的变异脚本
+> （含阴性对照、护栏集合收紧、覆盖生产路径）分别打两个版本：
+> - 对着**修复前**的实现：**8 组漏过** —— B1 / B2 / F1 / F2 / F3 / E3P / E4P，
+>   外加阴性对照 Z1（只改注释）**正确报漏过** ⇒ 这套 harness **会报漏过**，不是无脑报捕获；
+> - 对着**修复后**的实现：上述 8 组**全部转为捕获**，且每组红的都是**行为**护栏；
+>   只剩 H1（去掉「kernel 必填」守卫但**不**恢复默认分支 = 行为等价变异）正确漏过。
+
+---
+
+**Important 1（headline）：默认 `createKernel`（= 生产路径）完全没有护栏。**
+
+fix round 2 的第三层护栏（`start() hands the host context to the kernel unchanged`）
+**自己注入了 `createKernel`** —— 于是「宿主不传 `deps` 时走的那条默认实现」**从未被执行、也从未被观测**。
+
+> **盲区与 fix round 1 同构**：fix round 1 锚在「调用点**字面量**」，
+> fix round 2 的第三层锚在「调用点**入参**」—— 被观测的对象与实际生效的对象始终不是同一个。
+
+控制器实测（沙盒，58 条测试）：
+
+| 变异 | 结果 |
+|---|---|
+| B1：默认 `createKernel` 里 `ctx.dataDir` 被覆写成 `pluginRoot` | **exit 0 漏过** |
+| B2：默认 `createKernel` 里 `ctx.dataDir` 被删掉 | **exit 0 漏过** |
+
+评审方用端到端探针（只把 `spawn` 换成观测假 spawn，真调 `start(context)` **不传 deps**）证实：
+
+```
+PRISTINE : AGAISTOCK_DATA_DIR=…\hostdata          ✓
+B1 变异  : AGAISTOCK_DATA_DIR=…\sbx\agaistock      ✗ 插件目录
+```
+
+⇒ **缺陷在生产路径上复活，且没有任何一条测试变红。**
+
+**根因在计划本身**：fix round 2 的 Step 2e 原文就是
+`|| ((ctx, root) => (args) => runKernel(args, ctx, root));`，
+而 Step 1d 给的测试只观测 `createKernel` 的**入参**。
+实现者是**逐字照抄计划**的 —— 这条 finding 针对**计划 + 实现**，不是针对实现者。
+
+---
+
+**Important 2：文档订正 3 的「来源说明」结论方向反了（控制器自己的错）。**
+
+fix round 2 把「宿主会把 gitignored 产物一并拷进安装副本」判成**不成立**并**禁止**后来人再提。
+控制器独立复核后确认：**那句话成立**，订正方向反了。
+
+实测（epoch 秒，与时区无关）：
+
+```
+① 仓库插件包  miniapps/agaistock/src/agaistock/        24 个 .pyc
+③ 宿主持久安装 ~/.minimax/plugins/agaistock/src/agaistock/  24 个 .pyc
+   同名 24 个，mtime 完全相同 24/24，mtime 区间逐一相等（1795523403..1795526944）
+④ 运行时解包副本 %TEMP%/mavis-miniapp-XXXX/package/    24 个 .pyc
+   与 ③ 同名 24 个、mtime 相同 18 个（随包带进来）＋ 6 个晚于解包时刻（运行时写的）
+```
+
+⇒ **宿主确实把 gitignored 的 `__pycache__` 拷进了安装目录并保留 mtime。**
+（`tools/sync-kernel.py` 的 `IGNORE = ("__pycache__", "*.pyc", "*.pyo")` 正好说明这批是 gitignored 产物。）
+
+**但那 8 个 `data/chanlun/002378/*.json` 确实是运行时写的** ——
+仓库插件包、宿主持久安装目录、运行时解包副本**三处都没有 `data/` 目录**，
+它们只存在于宿主 `context.dataDir` 下。
+
+⇒ 正确表述是「**来源不可泛化**：这 8 个 JSON 是运行时写的；但『宿主会拷 gitignored 产物』这个一般命题成立，
+不能用文件计数或某个 `.pyc` 的 mtime 去推断别的文件的来源」。
+
+---
+
+**Important 3：`start()` 的局部 `dataDir`（`observations.json` 落点）无护栏。**
+
+`server.mjs` 里 `start()` 另有一份局部 `dataDir` 决定 `observations.json` 写哪；
+第三层护栏断言的是 `seen[0].ctx.dataDir`（context 里的），**两份之间没有任何护栏**。
+控制器实测变异 F1（`const dataDir = context.pluginRoot || context.dataDir;`）→ **exit 0 漏过**
+⇒ 观察卡会写进**插件目录**（与 Task 20 要消灭的缺陷同一家族）。
+
+---
+
+**Minor 1**：`handleRoute` 的默认 kernel 无护栏（变异 E3/E4 漏过）。
+生产路径不可达（`start()` 总是注入），但 E4 正是缺陷形态。
+→ 本轮**删掉这个默认分支**（`kernel` 变必填）—— 它本来就和 server.mjs 自己的注释
+「依赖全部由调用方显式注入」矛盾。
+
+**Minor 2**：第三层护栏的 `seen[0].root` 断言是**空断言** ——
+测试用的 `pluginRoot = join(import.meta.dirname,'..')` 恰好**等于**模块常量 `PLUGIN_ROOT`，
+于是「`start()` 忽略宿主给的 pluginRoot」这类变异在测试里是语义空操作（变异 F3 漏过）。
+→ 本轮改用**scratch 插件根**（复制到临时目录），断言才有意义。
+
+**Nit 1**：`runKernel` 的 `cwd` 没有任何断言（变异 F2 漏过）。
+设计文档 §16.4 那条「`AGAISTOCK_DATA_DIR` 给相对路径会按内核 cwd 解析」依赖 `cwd === pluginRoot`。
+
+---
+
+**修法（一句话）：把「默认实现」也变成被观测面。**
+
+- `start(context, deps)` 的默认 `createKernel` **透出 `deps.spawnFn`** ——
+  `runKernel` 本来就有这个注入点，只是默认实现没把它传下去。
+  透出来之后，**生产路径**就能被一条不注入 `createKernel` 的测试观测到。
+- `handleRoute` 的 `kernel` 变**必填**（删掉默认分支）—— 盲区直接消失。
+- 新增一条「观察卡落点」的行为断言（scratch 插件根 + scratch dataDir）。
+- 文档：来源说明改回**如实描述**；§16.4 的「能挡住本仓库内的改动」改成
+  「能挡住本仓库内**已覆盖到的**改动」。
+
+**Files:**
+- Modify: `miniapps/agaistock/miniapp/node/server.mjs`
+- Modify: `miniapps/agaistock/test/api.test.mjs`
+- Modify: `docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md`
+- Modify: `docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md`
+
+**Interfaces:**
+- Consumes: `context.dataDir`、`context.pluginRoot`（宿主给的）
+- Produces:
+  - `start(context, deps)` —— `deps.spawnFn` 现在**会**被默认内核工厂透出
+  - `handleRoute(request, response, options)` —— `options.kernel` 变成**必填**
+  - 其余签名不变
+
+- [ ] **Step 1: 改测试（RED）**
+
+**1a) 顶部 import 补 `fs/promises` 与 `os`：**
+
+```javascript
+import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+```
+
+**1b) 加一个 scratch 插件根的helper**（放在 `fakeKernel` 后面）：
+
+```javascript
+/**
+ * 造一个**临时插件根**。
+ *
+ * 为什么不用仓库里的 `miniapps/agaistock`：模块常量 `PLUGIN_ROOT` 恰好就等于它，
+ * 于是「`start()` 忽略宿主给的 pluginRoot」这类变异在测试里是**语义空操作** ——
+ * 断言会变成永远不可能失败的空断言（fix round 2 的 Minor 2）。
+ * 复制到 scratch 后，pluginRoot 与模块常量**不同**，断言才有意义。
+ */
+async function makeScratchPluginRoot() {
+  const base = await mkdtemp(join(tmpdir(), 'agaistock-plugin-'));
+  const root = join(base, 'plugin');
+  await mkdir(join(root, 'miniapp', 'client'), { recursive: true });
+  await cp(
+    join(import.meta.dirname, '..', 'miniapp', 'client'),
+    join(root, 'miniapp', 'client'),
+    { recursive: true },
+  );
+  return { base, root };
+}
+```
+
+**1c) 把第三层护栏改用 scratch 插件根**（原来那条 `start() hands the host context to the kernel unchanged`）：
+
+```javascript
+test('start() hands the host context to the kernel unchanged', async () => {
+  // 堵住「在 helper 之后覆写」这一类：只要 start() 递给内核的不是宿主给的
+  // context 原样，这条就红。start() 若绕过 createKernel 直接调 runKernel，
+  // 下面的 seen 会是空的 —— 一样红。
+  const seen = [];
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const dataDir = join(base, 'data');
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  const handle = await start(context, {
+    createKernel: (ctx, root, dbPath) => (args) => {
+      seen.push({ ctx, root, dbPath, args });
+      return Promise.resolve({ code: 0, stdout: '{"items":[]}', stderr: '' });
+    },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/observations`);
+    assert.equal(response.status, 200);
+  } finally {
+    await handle.dispose();
+    await rm(base, { recursive: true, force: true });
+  }
+  assert.ok(seen.length > 0, '内核必须真的被调用，且拿到宿主给的 context');
+  assert.equal(seen[0].ctx.dataDir, dataDir);
+  // ⚠️ pluginRoot 现在**不等于**模块常量 PLUGIN_ROOT —— 这条断言才有意义。
+  assert.equal(seen[0].root, pluginRoot);
+  assert.notEqual(seen[0].root, join(import.meta.dirname, '..', '..'));
+  assert.equal(seen[0].dbPath, join(dataDir, 'agaistock.db'));
+});
+```
+
+**1d) 追加「生产路径」测试**（**不注入 `createKernel`**，只注入 `spawn`）：
+
+```javascript
+test('the default kernel factory hands the host context to the kernel unchanged', async () => {
+  // **不注入 createKernel** —— 宿主不传 deps 时走的就是这条生产路径。
+  // 上一轮的护栏全都绕开了它（它们自己注入 createKernel），
+  // 于是「默认实现把 dataDir 写回插件目录」这种变异能全绿通过（Important 1）。
+  // 这里只把 spawn 换成观测用的假 spawn，其余走**真实默认实现**。
+  const captured = [];
+  const fakeChild = {
+    stdout: { on() {} },
+    stderr: { on() {} },
+    kill() {},
+    on(event, handler) {
+      if (event === 'close') setImmediate(() => handler(0));
+    },
+  };
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const dataDir = join(base, 'data');
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  const handle = await start(context, {
+    spawnFn: (command, argv, options) => {
+      captured.push({ command, argv, env: options.env, cwd: options.cwd });
+      return fakeChild;
+    },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/observations`);
+    assert.equal(response.status, 200);
+  } finally {
+    await handle.dispose();
+    await rm(base, { recursive: true, force: true });
+  }
+  assert.ok(captured.length > 0, '生产路径必须真的 spawn 了内核');
+  assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, dataDir);
+  assert.equal(captured[0].env.AGAISTOCK_DB, join(dataDir, 'agaistock.db'));
+  assert.equal(captured[0].env.PYTHONPATH, join(pluginRoot, 'src'));
+  assert.equal(captured[0].cwd, pluginRoot);
+});
+```
+
+**1e) 追加「观察卡落点」测试**（守 `start()` 的局部 `dataDir`）：
+
+```javascript
+test('start() keeps the observation file in the host data dir, not the plugin dir', async () => {
+  // start() 内部另有一份**局部** dataDir 决定 observations.json 写哪 ——
+  // 它和 context.dataDir 之间没有任何护栏（Important 3）。
+  // 用 scratch 插件根做断言：写错也只污染临时目录，不污染仓库。
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const dataDir = join(base, 'data');
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  const handle = await start(context, {
+    createKernel: () => async () => ({ code: 0, stdout: '{"items":[]}', stderr: '' }),
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/save`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ draft: { symbol: '002378', thesis: 'x' }, rawText: 'x' }),
+    });
+    assert.equal(response.status, 200);
+  } finally {
+    await handle.dispose();
+  }
+  assert.ok(
+    existsSync(join(dataDir, 'observations.json')),
+    '观察卡必须落在宿主给的 dataDir',
+  );
+  assert.ok(
+    !existsSync(join(pluginRoot, 'observations.json')),
+    '观察卡绝不能落进插件目录（那是安装产物）',
+  );
+  await rm(base, { recursive: true, force: true });
+});
+```
+
+**1f) 追加「`kernel` 必填」的契约测试**（Minor 1）：
+
+```javascript
+test('handleRoute refuses to guess the kernel', async () => {
+  // kernel 必须由调用方显式注入 —— 有默认分支就有盲区。
+  await assert.rejects(
+    () => handleRoute(makeRequest('GET', '/api/observations'), new FakeResponse(), {}),
+    /kernel/,
+  );
+});
+```
+
+**1g) 给 `runKernel` 的 `cwd` 补断言**（Nit 1）——
+在 `the kernel subprocess actually receives the host data dir` 里，
+把捕获改成 `captured.push({ command, argv, env: options.env, cwd: options.cwd });`
+并追加：
+
+```javascript
+  assert.equal(captured[0].cwd, 'D:\\pkg');
+```
+
+- [ ] **Step 2: `server.mjs` 改三处**
+
+**a) 默认内核工厂透出 `deps.spawnFn`**（Important 1 的根因）：
+
+```javascript
+  // 内核工厂可注入：测试要能观测 start() 到底把什么递给了内核。
+  // 默认实现把**宿主的 context 原样**传给 runKernel，并把 `deps.spawnFn` 透传下去 ——
+  // 没有这个透传，**默认实现本身就是盲区**：宿主不传 deps 时走的就是这条生产路径，
+  // 而上一轮的护栏全都自己注入 createKernel，从没观测过它。
+  const createKernel = deps.createKernel
+    || ((ctx, root) => (args) => runKernel(args, ctx, root, deps.spawnFn));
+  const kernel = createKernel(context, pluginRoot, dbPath);
+```
+
+**b) `handleRoute` 的 `kernel` 变必填**（Minor 1）：
+
+```javascript
+  const {
+    context = {},
+    ...
+    kernel,
+    dbPath = '',
+    dataDir = '',
+  } = options;
+
+  // kernel **必须**显式注入（不再有默认分支）：默认分支在生产路径上不可达，
+  // 却能让「路径被写回插件目录」的变异悄悄溜过全部测试 —— 与 fix round 1
+  // 栽的跟头同构。start() 永远会注入，测试也永远会注入。
+  if (typeof kernel !== 'function') {
+    throw new Error('handleRoute 需要显式注入 kernel');
+  }
+```
+
+> `handleRoute` 里所有 `kernel(...)` 调用点**不用改** —— 变量名不变。
+> `start()` 里的 `handleRoute(request, response, { ..., kernel, ... })` 也**不用改**。
+
+**c) `start()` 的局部 `dataDir` 加一句注释**（说明它与 `context.dataDir` 的绑定关系）：
+
+```javascript
+  // 局部 dataDir 与 context.dataDir **必须是同一个**（下面那两条行为断言在守这件事）：
+  // 它决定 observations.json 落哪，也决定内核的运行路径。
+  const dataDir = context.dataDir;
+```
+
+- [ ] **Step 3: 文档订正（Important 2 + §16.4 的措辞）**
+
+1. **计划 Task 20 小节**的「来源说明」（约 8146-8151 行）改成**如实描述**：
+
+   ```
+   > **来源说明**：这 8 个 `data/chanlun/002378/*.json` 是**运行时写的** ——
+   > 仓库插件包、宿主持久安装目录、运行时解包副本**三处都没有 `data/` 目录**，
+   > 它们只存在于宿主 `context.dataDir` 下。
+   > ⚠️ 但**不要**把这条推广成「宿主不会拷 gitignored 产物」—— **那个一般命题是成立的**：
+   > 实测仓库插件包 `miniapps/agaistock/src/agaistock/**` 的 24 个 `.pyc` 与宿主持久安装目录
+   > `~/.minimax/plugins/agaistock/src/agaistock/**` 的 24 个 `.pyc` **mtime 24/24 完全相同**，
+   > 其中 18 个还**早于**运行时解包时刻 ⇒ 这批 `.pyc` 确实是宿主拷进去的
+   > （`__pycache__` 是 gitignored 产物）。
+   > ⇒ **来源不可泛化**：文件计数、某个 `.pyc` 的 mtime，都不能用来推断别的文件的来源。
+   > 缺陷本身由**代码 + 只读安装复现**证明，不靠文件计数。
+   ```
+
+2. **控制器上一轮补刀**（fix round 1 小节 Step 4 第 2 条，约 8569-8571 行）里
+   「来源判断**已被证伪** / 那句话**不成立**」改成：
+   「文件数是 **8** 个不是 9 个；**来源判断不可判定**（见 fix round 2 Step 3 第 3 条与 fix round 3 Step 3 第 1 条）」。
+
+3. **设计文档 §16.4** 的括号：「三层**行为**护栏锁住它 —— …**能挡住本仓库内的改动**」
+   → 改成「**能挡住本仓库内已被护栏覆盖到的改动**（env 纯函数 / 真实 spawn 路径 / `start()` 注入点 /
+   **默认内核工厂**）；**未覆盖的路径仍无护栏**，宿主侧回归同样挡不住」。
+
+4. **计划 fix round 2 小节**顶部加一句「本小节已被 fix round 3 补充（默认内核工厂与 `start()` 局部
+   `dataDir` 两处盲区已补）」。
+
+- [ ] **Step 4: 跑全量测试 + 加固后的变异脚本**
+
+```bash
+python -m unittest discover -s tests -t .
+node --test "miniapps/agaistock/test/*.test.mjs"
+node --check miniapps/agaistock/miniapp/node/server.mjs
+node tools\check-spec.mjs docs\superpowers\plans\2026-11-24-reviewer-layer-and-chanlun-reviewer.md --external docs\superpowers\specs\2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md --external docs\superpowers\specs\2026-11-24-stock-review-app-architecture.md
+```
+
+**封闭性验证（必做）**：
+
+```bash
+$env:AGAISTOCK_DATA_DIR='D:\ambient\host\data'; node --test "miniapps/agaistock/test/*.test.mjs"
+```
+
+预期**全绿**。
+
+**变异验证（必做）**：控制器会提供加固后的 `.tmp\task20-fix3\mutations.py`，它合并了
+控制器的 13 组 + 评审方的 30 组（去重），并**加了两样东西**：
+
+- **阴性对照**：只改一条注释 ⇒ **必须报「漏过」**（证明 harness 不会无脑报「捕获」）。
+- **护栏集合收紧**：只认**行为**护栏（不再把「只断言 `undefined`」的弱测试算进护栏命中）。
+
+覆盖的变异组至少包括：B1/B2（默认内核工厂）、F1（`start()` 局部 dataDir）、
+E3/E4（`handleRoute` 默认 kernel）、F2（`cwd`）、F3（`pluginRoot`）、
+M8/M9/M14/M15/M16/C4（fix round 1 漏过的 6 组）、X1–X7（回归形态）。
+**预期：全部被捕获**。
+
+> 控制器在派发前会先在沙盒上实跑一遍这套变异脚本，确认它**先红后绿** ——
+> 即：对着**修复前**的实现跑，这几组必须是「漏过」，对着**修复后**的实现跑才是「捕获」。
+> 没有这一步，这套脚本可能一直在报「捕获」而没人知道。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/test/api.test.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md
+git commit -m "fix: observe the default kernel factory and the observation file landing dir" -- miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/test/api.test.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md
+```
+
+> **不要用 `git add -A`**（Global Constraint 14）。
+> 本轮**不改** `src/agaistock/**` —— 若确实需要改内核源码，必须先跑
+> `python tools/sync-kernel.py` 并把内核副本一起提交。
+
+---
+
 ---
 
 ## Appendix A: 常用命令速查
