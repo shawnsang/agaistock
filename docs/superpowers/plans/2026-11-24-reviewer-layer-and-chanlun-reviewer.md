@@ -2396,6 +2396,7 @@ python -c "from pathlib import Path; p=Path('src/agaistock/skills/anchor_chanlun
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from agaistock.skills.anchor_chanlun import engine
 
@@ -2481,6 +2482,21 @@ class ChanlunEngineTests(unittest.TestCase):
         # 上游 vendor 已固定版本，这条断言锁住它的报错文案
         self.assertIn("未找到 K 线文件", str(ctx.exception))
 
+    def test_run_script_timeout_is_reported_as_runtime_error(self):
+        # 失败契约统一为 RuntimeError：调用方（Task 8/10 的失败隔离）只 catch 一种异常，
+        # 不需要额外知道 subprocess.TimeoutExpired 的存在。
+        with mock.patch.object(
+            engine.subprocess,
+            "run",
+            side_effect=engine.subprocess.TimeoutExpired(
+                cmd="chan_analyze.py", timeout=engine.SCRIPT_TIMEOUT
+            ),
+        ):
+            with TemporaryDirectory() as tmp:
+                with self.assertRaises(RuntimeError) as ctx:
+                    engine._run_script("chan_analyze.py", Path(tmp), ["--level", "day"])
+        self.assertIn("超时", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -2527,15 +2543,20 @@ def vendor_root() -> Path:
 
 
 def _run_script(script: str, work_dir: Path, extra: list[str]) -> None:
-    result = subprocess.run(
-        [sys.executable, str(vendor_root() / "scripts" / script), str(work_dir), *extra],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=str(work_dir),
-        timeout=SCRIPT_TIMEOUT,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(vendor_root() / "scripts" / script), str(work_dir), *extra],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(work_dir),
+            timeout=SCRIPT_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # 失败契约统一为 RuntimeError —— 调用方按 `except RuntimeError` 捕获即可，
+        # 不必知道超时是 subprocess 的另一类异常。
+        raise RuntimeError(f"{script} 执行超时(>{SCRIPT_TIMEOUT}s)") from exc
     if result.returncode != 0:
         # 上游脚本只用 print() 报告原因，**不写 stderr** —— 只看 stderr 会得到空消息。
         detail = ((result.stdout or "") + (result.stderr or "")).strip()
@@ -2591,7 +2612,7 @@ def build_structure(
 python -m unittest tests.test_chanlun_engine -v
 ```
 
-Expected: 6 tests PASS
+Expected: 9 tests PASS
 
 - [ ] **Step 6: 真实数据验证（关键一步）**
 
