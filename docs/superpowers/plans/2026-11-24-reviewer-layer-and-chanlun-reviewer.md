@@ -34,12 +34,26 @@
 13. **软删除**：置 `observations.deleted_at`，**不物理删除**；软删观察不参与评分 / 观察期 / 校准统计，其 `reviews` 保留。
 14. **每个 Task 结束必须 commit**。仓库尚未初始化，Task 1 负责 `git init`。
 15. 内核包路径统一为 `src/agaistock/`，通过 `pyproject.toml` 的 `src` 布局安装；测试放 `tests/`。
-16. **复权口径（D6；2026-11-24 用户裁决）**：K 线一律取 **后复权**，即 `tdx_kline` **必须**带 `tqFlag:"2"`（不传会拿到连接器默认的**前复权**，同一批 K 线价位可差数倍）。复权因子经 `tdx_api_data` 的 `capital_flow` preset 取 `adjustment_factor` 表并**落库**（主规格 §6.7.4）。**所有中枢 / 枢轴 / 支撑压力 / 证伪位都是后复权空间的价位**；若要向用户展示现价口径，用 `adjustment_factors` 表换算，不得把后复权价位直接说成现价。
-17. **复权口径在适配层收口**（主规格 §6.7）：provider 返回统一 schema，`tqFlag` 由 `providers/tdx.py` 固定为 `"2"`，不向调用方暴露成可切换参数——避免下游任务各自选口径。
+16. **复权口径（D6；2026-11-24 用户裁决）**：K 线一律取 **后复权**。
+    **不能依赖连接器的 `tqFlag:"2"`** —— 实测该参数**只在日线/周线生效，30 分钟级别不生效**
+    （600519 的 m30 `tqFlag:"2"` 给 `1563.54`，同一天日线给 `10014.70`；002378 m30 给 `15.73`，日线给 `42.66`）。
+    后果：三个级别会落在**两个价格空间**，上游 `key_levels` 把它们拍平成一张表，
+    证伪位就成了「后复权价位 vs 前复权价位」的混账。
+    → **后复权由 provider 层自己统一重建**：取 `tqFlag:"0"`（不复权）原始序列 + 复权因子表 →
+    逐 bar 换算 `后复权价(d) = 不复权价(d) × 精确复权因子 + 精确复权常数`，
+    因子行取 **ex_date ≤ d 的最新一行**（因子表日期带连字符、K 线日期不带，比较前统一成 `YYYYMMDD`）；
+    早于首个 ex_date 的用 factor=1 / constant=0。
+    该规则已实测**精确复现连接器自身的后复权**：600519 700 根日线中位相对误差 0.00003%（纯舍入）、
+    300 根周线 300/300 命中；002378 误差 ≤0.002%（连接器自身只给 2 位小数）。
+    `Volume` / `Amount` **保持原值**（与连接器后复权行为一致）。
+17. **复权口径在适配层收口**（主规格 §6.7）：provider 返回统一 schema；`tqFlag`、因子换算都由 `providers/tdx.py` 处理，**不向调用方暴露成可切换参数** —— 避免下游任务各自选口径。
 18. **后复权 ↔ 现价 的换算公式（已实测）**：`后复权价 = 现价 × 精确复权因子 + 精确复权常数`，反解 `现价 = (后复权价 − 精确复权常数) / 精确复权因子`。
     因子与常数取 `adjustment_factor` 表中**该价格所属日期**的那一行（对「当前价位」用最新一行）。
     实测：600519 `1460.00 × 5.627766 + 1798.159313 = 10014.70`（= `tdx_kline` 的 `tqFlag:"2"` 实测值）；002378 `15.54 × 2.6 + 2.2552 = 42.66` ✓。
     **推论**：后复权序列的价位与实时行情（现价）**不在同一空间**，凡是拿后复权位与现价比对的地方（如 Task 10 的 `fetch_last_close` 回退路径、Task 15 的展示）**必须**先换算，否则会把 10014 当成 1460 比。
+19. **连接器返回形态不稳定**：`tdx_api_data` 偶尔返回 `response.data`（未套用 preset 转换）而不是 `response.transformed.tables`。
+    因此 `fetch_adjustment_factors` 在「请求成功但找不到因子表」时**必须重试一次，仍失败就抛错**，
+    **不得静默返回 `[]`** —— 静默空表会被当成「该标的没有除权记录」，导致后复权重建悄悄退化成不复权。
 
 ---
 
@@ -1467,13 +1481,26 @@ git commit -m "feat: reviewer registry and execution engine with failure isolati
   - `agaistock.providers.mcode_cli.call_connector(tool: str, args: dict, timeout: int = 180) -> str`
     返回连接器返回的 **text 字段**（已剥掉外层 `[{type:"text",text:...}]` 包装）。
   - `agaistock.providers.mcode_cli.MCodedToolsMissing(RuntimeError)` —— CLI 不在 PATH 时抛出。
-  - `agaistock.providers.tdx.fetch_kline(symbol: str, setcode: str, period: str, want_num: int = 500) -> dict`
-    返回**原始 payload**（含 `Rows` / `ListHead` / `AttachInfo`）。**固定请求后复权**（内部带 `tqFlag:"2"`），
+  - `agaistock.providers.tdx.fetch_raw_kline(symbol: str, setcode: str, period: str, want_num: int = 500) -> dict`
+    返回**不复权**原始 payload（`tqFlag="0"`，含 `Rows` / `ListHead` / `AttachInfo`）。
+  - `agaistock.providers.tdx.fetch_kline(symbol: str, setcode: str, period: str, want_num: int = 500, factors: list[dict] | None = None) -> dict`
+    返回**后复权** payload（结构与原始 payload 相同，`Rows` 里的 `Open`/`High`/`Low`/`Close` 已是后复权价）。
+    **后复权由本层自己重建**（不依赖连接器的 `tqFlag:"2"` —— 实测它对 30 分钟级别不生效，
+    见 Global Constraint 16）：取不复权序列 + 复权因子表 → 逐 bar 换算。
+    `factors` 可传入已取好的因子表以避免重复调用；不给则内部自己取。
     调用方无需也不能切换复权口径（Global Constraint 16/17）。
   - `agaistock.providers.tdx.fetch_adjustment_factors(symbol: str) -> list[dict]`
     拉取该标的的**复权因子**（经 `tdx_api_data` 的 `capital_flow` preset），归一化为
     `[{"ex_date": "2026-06-26", "factor": 2.6, "constant": 2.2552}, ...]`，按 `ex_date` 降序；
-    该标的没有除权记录时返回 `[]`。
+    该标的**确实没有**除权记录时返回 `[]`。
+    **「请求成功但找不到因子表」不是空表**：连接器返回形态不稳定（Global Constraint 19），
+    此时必须重试一次，仍失败**抛错**，不得静默返回 `[]`。
+  - `agaistock.providers.tdx.factor_row_for(factors: list[dict], date: str) -> dict`
+    取某日期生效的因子行（`ex_date ≤ date` 的最新一行，日期统一成 `YYYYMMDD` 比较）；
+    早于首个 ex_date 时返回 `{"ex_date": "", "factor": 1.0, "constant": 0.0}`（恒等变换）。
+  - `agaistock.providers.tdx.apply_houfuquan(payload: dict, factors: list[dict]) -> dict`
+    把 payload 里 `Rows` 的 `Open`/`High`/`Low`/`Close` 换算成后复权价，返回新 payload（原 payload 不改）。
+    `Volume` / `Amount` 保持原值。
   - `agaistock.providers.tdx.setcode_for(symbol: str) -> str`，按代码前缀推断市场：`6`→`"1"`，`0`/`3`→`"0"`，`4`/`8`/`9`→`"2"`（北交所含 `920xxx`）。
   - `agaistock.providers.tdx.TDX_KLINE = "connector__tdx-finance__tdx_kline"`
   - `agaistock.providers.tdx.TDX_API_DATA = "connector__tdx-finance__tdx_api_data"`
@@ -1592,14 +1619,112 @@ class TdxTests(unittest.TestCase):
             tdx.setcode_for("12345")
 
     @mock.patch("agaistock.providers.tdx.call_connector")
-    def test_fetch_kline_requests_houfuquan(self, fake_call):
-        fake_call.return_value = json.dumps({"Rows": []})
-        tdx.fetch_kline("600519", "1", "4", want_num=3)
-        tool, args = fake_call.call_args[0]
-        self.assertEqual(tool, tdx.TDX_KLINE)
-        # D6 口径：必须显式带 tqFlag=2，否则连接器默认返回前复权
-        self.assertEqual(args["tqFlag"], "2")
-        self.assertEqual(args["wantNum"], 3)
+    def test_fetch_kline_requests_raw_series_and_rebuilds_houfuquan(self, fake_call):
+        # 连接器的 tqFlag="2" 对 30 分钟级别不生效，所以本层取不复权原始序列自己重建
+        def fake(tool, args):
+            if tool == tdx.TDX_KLINE:
+                self.assertEqual(args["tqFlag"], "0")
+                return json.dumps(
+                    {
+                        "Rows": [
+                            {
+                                "Data": "20261124",
+                                "Open": "1460.00", "High": "1470.00",
+                                "Low": "1450.00", "Close": "1460.00",
+                                "Volume": 100.0, "Amount": 146000.0,
+                            }
+                        ]
+                    }
+                )
+            return json.dumps(
+                {
+                    "response": {
+                        "transformed": {
+                            "tables": [
+                                {
+                                    "name": "adjustment_factor",
+                                    "rows": [
+                                        {
+                                            "日期": "2026-06-26",
+                                            "精确复权因子": 5.627766,
+                                            "精确复权常数": 1798.159313,
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                },
+                ensure_ascii=False,
+            )
+
+        fake_call.side_effect = fake
+        payload = tdx.fetch_kline("600519", "1", "4", want_num=1)
+        row = payload["Rows"][0]
+        # 1460.00 × 5.627766 + 1798.159313 = 10014.70（实测的日线后复权值）
+        self.assertAlmostEqual(float(row["Close"]), 10014.70, places=2)
+        self.assertAlmostEqual(float(row["Open"]), 10014.70, places=2)
+        # 量额保持原值
+        self.assertEqual(row["Amount"], 146000.0)
+        self.assertEqual(row["Volume"], 100.0)
+
+    @mock.patch("agaistock.providers.tdx.call_connector")
+    def test_fetch_kline_uses_provided_factors_without_extra_call(self, fake_call):
+        fake_call.side_effect = lambda tool, args: json.dumps(
+            {
+                "Rows": [
+                    {
+                        "Data": "20261124", "Open": "1460.00", "High": "1470.00",
+                        "Low": "1450.00", "Close": "1460.00",
+                        "Volume": 100.0, "Amount": 146000.0,
+                    }
+                ]
+            }
+        )
+        factors = [{"ex_date": "2026-06-26", "factor": 5.627766, "constant": 1798.159313}]
+        payload = tdx.fetch_kline("600519", "1", "4", want_num=1, factors=factors)
+        self.assertAlmostEqual(float(payload["Rows"][0]["Close"]), 10014.70, places=2)
+        # 只调了一次连接器（K 线），因子表是调用方给的
+        self.assertEqual(fake_call.call_count, 1)
+
+    def test_factor_row_for_picks_the_latest_row_not_after_the_date(self):
+        factors = [
+            {"ex_date": "2026-06-26", "factor": 5.627766, "constant": 1798.159313},
+            {"ex_date": "2025-12-19", "factor": 5.627766, "constant": 1640.4455},
+            {"ex_date": "2024-12-20", "factor": 5.627766, "constant": 1349.883934},
+        ]
+        # 因子表日期带连字符、K 线日期不带，比较必须归一化
+        self.assertEqual(tdx.factor_row_for(factors, "20260626")["ex_date"], "2026-06-26")
+        self.assertEqual(tdx.factor_row_for(factors, "20250108")["ex_date"], "2024-12-20")
+        # 早于最早一行因子 → 恒等变换
+        early = tdx.factor_row_for(factors, "20240102")
+        self.assertEqual(early["ex_date"], "")
+        self.assertEqual(early["factor"], 1.0)
+        self.assertEqual(early["constant"], 0.0)
+
+    def test_factor_row_for_before_first_ex_date_is_identity(self):
+        factors = [{"ex_date": "2026-06-26", "factor": 5.627766, "constant": 1798.159313}]
+        row = tdx.factor_row_for(factors, "20240102")
+        self.assertEqual(row["factor"], 1.0)
+        self.assertEqual(row["constant"], 0.0)
+
+    def test_apply_houfuquan_leaves_volume_and_amount_untouched(self):
+        payload = {
+            "Rows": [
+                {
+                    "Data": "20261124", "Open": "1460.00", "High": "1470.00",
+                    "Low": "1450.00", "Close": "1460.00",
+                    "Volume": 100.0, "Amount": 146000.0,
+                }
+            ]
+        }
+        factors = [{"ex_date": "2026-06-26", "factor": 5.627766, "constant": 1798.159313}]
+        converted = tdx.apply_houfuquan(payload, factors)
+        self.assertAlmostEqual(float(converted["Rows"][0]["Close"]), 10014.70, places=2)
+        self.assertEqual(converted["Rows"][0]["Volume"], 100.0)
+        self.assertEqual(converted["Rows"][0]["Amount"], 146000.0)
+        # 原 payload 不被就地修改
+        self.assertEqual(payload["Rows"][0]["Close"], "1460.00")
 
     @mock.patch("agaistock.providers.tdx.call_connector")
     def test_fetch_adjustment_factors_normalizes_rows(self, fake_call):
@@ -1638,12 +1763,31 @@ class TdxTests(unittest.TestCase):
         )
 
     @mock.patch("agaistock.providers.tdx.call_connector")
-    def test_fetch_adjustment_factors_empty_when_table_absent(self, fake_call):
+    def test_fetch_adjustment_factors_empty_when_table_has_no_rows(self, fake_call):
         fake_call.return_value = (
             "tdx_api_data 请求成功\n\n"
-            + json.dumps({"response": {"transformed": {"tables": []}}}, ensure_ascii=False)
+            + json.dumps(
+                {
+                    "response": {
+                        "transformed": {"tables": [{"name": "adjustment_factor", "rows": []}]}
+                    }
+                },
+                ensure_ascii=False,
+            )
         )
         self.assertEqual(tdx.fetch_adjustment_factors("002378"), [])
+
+    @mock.patch("agaistock.providers.tdx.call_connector")
+    def test_fetch_adjustment_factors_raises_when_table_missing(self, fake_call):
+        # 连接器返回形态不稳定：找不到因子表 != 该标的没有除权记录。
+        # 必须重试一次，仍失败就抛错，不能静默返回空表。
+        fake_call.return_value = (
+            "tdx_api_data 请求成功\n\n"
+            + json.dumps({"response": {"data": {"anything": 1}}}, ensure_ascii=False)
+        )
+        with self.assertRaises(RuntimeError):
+            tdx.fetch_adjustment_factors("002378")
+        self.assertEqual(fake_call.call_count, 2)
 
     def test_to_houfuquan_matches_measured_formula(self):
         # 600519 2026-06-26 的因子行：现价 1460.00 → 后复权 10014.70
@@ -1762,7 +1906,16 @@ def call_connector(tool: str, args: dict, timeout: int = 180) -> str:
 ```python
 """通达信取数（经由 mcode-tools 连接器）。
 
-复权口径（D6 / Global Constraint 16）：K 线固定取**后复权**（tqFlag="2"）。
+复权口径（D6 / Global Constraint 16）：K 线一律取**后复权**。
+
+关键事实（实测 2026-11-24）：
+  - 连接器的 `tqFlag="2"`（后复权）**只在日线/周线生效，30 分钟级别不生效**：
+    600519 的 m30 给 1563.54，同一天的日线给 10014.70；002378 m30 给 15.73、日线给 42.66。
+    直接用连接器的后复权，三个级别会落在两个价格空间。
+  - 所以本层取 `tqFlag="0"`（不复权）原始序列 + 复权因子表，**自己重建**后复权。
+    重建规则与连接器自身的后复权一致（600519 700 根日线中位相对误差 0.00003%）。
+  - `Volume` / `Amount` 保持原值（与连接器后复权行为一致）。
+
 口径在适配层收口，调用方不传、不切换。
 """
 from __future__ import annotations
@@ -1775,13 +1928,15 @@ TDX_KLINE = "connector__tdx-finance__tdx_kline"
 TDX_QUOTES = "connector__tdx-finance__tdx_quotes"
 TDX_API_DATA = "connector__tdx-finance__tdx_api_data"
 
-# D6 口径：后复权序列。不传这个参数，连接器默认给的是前复权。
-TQ_FLAG_HOUFUQUAN = "2"
+# 请求连接器时固定要**不复权**原始序列，后复权由本层重建。
+TQ_FLAG_RAW = "0"
 
 # 复权因子所在的后端接口与子视图（主规格 §6.7.4）。
-# 同一个 preset 还顺带返回 capital_flow 表；本任务只取复权因子。
 _ADJ_ENTRY = "TdxSharePCCW.tdxf10_gg_jyds"
 _ADJ_FIXED_TAG = "zjlx"
+
+# 需要做后复权换算的价格字段。
+_PRICE_KEYS = ("Open", "High", "Low", "Close")
 
 
 def setcode_for(symbol: str) -> str:
@@ -1815,25 +1970,32 @@ def _payload_from_text(text: str) -> dict:
     return payload
 
 
-def fetch_kline(symbol: str, setcode: str, period: str, want_num: int = 500) -> dict:
-    """拉取 K 线（后复权），返回原始 payload（含升序的 Rows）。"""
-    text = call_connector(
-        TDX_KLINE,
-        {
-            "code": str(symbol),
-            "setcode": str(setcode),
-            "period": str(period),
-            "wantNum": int(want_num),
-            "tqFlag": TQ_FLAG_HOUFUQUAN,
-        },
-    )
-    return _payload_from_text(text)
+def _normalize_factor_rows(table: dict) -> list[dict]:
+    """把 adjustment_factor 表归一化成 [{ex_date, factor, constant}]，按 ex_date 降序。"""
+    factors = []
+    for row in table.get("rows") or []:
+        try:
+            factor = float(row["精确复权因子"])
+            constant = float(row["精确复权常数"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"复权因子表缺少预期列：{row}") from exc
+        factors.append(
+            {
+                "ex_date": str(row.get("日期", "")).strip(),
+                "factor": factor,
+                "constant": constant,
+            }
+        )
+    factors.sort(key=lambda item: item["ex_date"], reverse=True)
+    return factors
 
 
-def fetch_quotes(symbol: str, setcode: str) -> dict:
-    """拉取实时行情快照。"""
-    text = call_connector(TDX_QUOTES, {"code": str(symbol), "setcode": str(setcode)})
-    return _payload_from_text(text)
+def _find_factor_table(payload: dict) -> dict | None:
+    tables = (payload.get("response") or {}).get("transformed", {}).get("tables") or []
+    for table in tables:
+        if table.get("name") == "adjustment_factor":
+            return table
+    return None
 
 
 def fetch_adjustment_factors(symbol: str) -> list[dict]:
@@ -1842,28 +2004,113 @@ def fetch_adjustment_factors(symbol: str) -> list[dict]:
     数据来自 tdx_api_data 的 capital_flow preset —— 同一个 preset 返回两张表，
     复权因子那张叫 adjustment_factor，列名是中文：
     日期 / 精确复权因子 / 精确复权常数。
+
+    连接器返回形态不稳定（Global Constraint 19）：偶尔给 `response.data` 而不是
+    `response.transformed.tables`。所以「找不到因子表」**不等于**「该标的没有除权记录」，
+    先重试一次，仍失败就抛错 —— 静默返回空表会让后复权重建悄悄退化成不复权。
     """
-    text = call_connector(
-        TDX_API_DATA,
-        {"entry": _ADJ_ENTRY, "fixedTag": _ADJ_FIXED_TAG, "code": str(symbol)},
-    )
-    payload = _payload_from_text(text)
-    tables = (payload.get("response") or {}).get("transformed", {}).get("tables") or []
-    for table in tables:
-        if table.get("name") != "adjustment_factor":
+    for attempt in range(2):
+        text = call_connector(
+            TDX_API_DATA,
+            {"entry": _ADJ_ENTRY, "fixedTag": _ADJ_FIXED_TAG, "code": str(symbol)},
+        )
+        payload = _payload_from_text(text)
+        table = _find_factor_table(payload)
+        if table is not None:
+            return _normalize_factor_rows(table)
+    raise RuntimeError(f"拉取 {symbol} 的复权因子失败：未找到 adjustment_factor 表")
+
+
+def factor_row_for(factors: list[dict], date: str) -> dict:
+    """取某日期生效的因子行：ex_date ≤ date 的最新一行。
+
+    因子表的日期带连字符（2026-06-26），K 线日期不带（20261124）——
+    比较前统一成 YYYYMMDD，否则字符串比较会挑错行。
+    早于首个 ex_date 的日期返回恒等变换（factor=1, constant=0）。
+
+    **与入参顺序无关**：`fetch_adjustment_factors` 返回的是 ex_date 降序，
+    这里必须自己取「匹配行里 ex_date 最大的那个」，不能靠遍历顺序碰运气。
+    """
+    key = str(date).replace("-", "")
+    best = None
+    best_key = ""
+    for row in factors or []:
+        row_key = str(row.get("ex_date", "")).replace("-", "")
+        if not row_key or row_key > key:
             continue
-        factors = []
-        for row in table.get("rows") or []:
-            factors.append(
-                {
-                    "ex_date": str(row.get("日期", "")),
-                    "factor": float(row.get("精确复权因子", 0) or 0),
-                    "constant": float(row.get("精确复权常数", 0) or 0),
-                }
-            )
-        factors.sort(key=lambda item: item["ex_date"], reverse=True)
-        return factors
-    return []
+        if row_key >= best_key:
+            best = row
+            best_key = row_key
+    return best or {"ex_date": "", "factor": 1.0, "constant": 0.0}
+
+
+def apply_houfuquan(payload: dict, factors: list[dict]) -> dict:
+    """把 payload 里 Rows 的价格字段换算成后复权，返回新 payload（原 payload 不改）。
+
+    后复权价(d) = 不复权价(d) × 精确复权因子 + 精确复权常数
+    `Volume` / `Amount` 保持原值（与连接器后复权行为一致）。
+    """
+    rows = payload.get("Rows") or []
+    converted = []
+    for row in rows:
+        if not isinstance(row, dict):
+            converted.append(row)
+            continue
+        frow = factor_row_for(factors, row.get("Data", ""))
+        factor = float(frow.get("factor", 1.0))
+        constant = float(frow.get("constant", 0.0))
+        new_row = dict(row)
+        for key in _PRICE_KEYS:
+            value = row.get(key)
+            if value is None:
+                continue
+            try:
+                new_row[key] = f"{float(value) * factor + constant:.6f}"
+            except (TypeError, ValueError):
+                continue
+        converted.append(new_row)
+    new_payload = dict(payload)
+    new_payload["Rows"] = converted
+    return new_payload
+
+
+def fetch_raw_kline(symbol: str, setcode: str, period: str, want_num: int = 500) -> dict:
+    """拉取不复权原始序列，返回原始 payload（含升序的 Rows）。"""
+    text = call_connector(
+        TDX_KLINE,
+        {
+            "code": str(symbol),
+            "setcode": str(setcode),
+            "period": str(period),
+            "wantNum": int(want_num),
+            "tqFlag": TQ_FLAG_RAW,
+        },
+    )
+    return _payload_from_text(text)
+
+
+def fetch_kline(
+    symbol: str,
+    setcode: str,
+    period: str,
+    want_num: int = 500,
+    factors: list[dict] | None = None,
+) -> dict:
+    """拉取后复权序列（口径在适配层收口，调用方不切换）。
+
+    `factors` 可传入已取好的因子表以避免重复调用；不给则内部自己取。
+    """
+    payload = fetch_raw_kline(symbol, setcode, period, want_num)
+    if not (payload.get("Rows") or []):
+        return payload
+    factor_rows = factors if factors is not None else fetch_adjustment_factors(symbol)
+    return apply_houfuquan(payload, factor_rows)
+
+
+def fetch_quotes(symbol: str, setcode: str) -> dict:
+    """拉取实时行情快照（现价口径，不复权）。"""
+    text = call_connector(TDX_QUOTES, {"code": str(symbol), "setcode": str(setcode)})
+    return _payload_from_text(text)
 
 
 def to_houfuquan(price: float, factor_row: dict) -> float:
@@ -1888,7 +2135,7 @@ def to_current_price(price: float, factor_row: dict) -> float:
 python -m unittest tests.test_mcode_cli tests.test_tdx -v
 ```
 
-Expected: 16 tests PASS（`test_mcode_cli` 5 条 + `test_tdx` 11 条）+ `test_storage` 9 条
+Expected: 21 tests PASS（`test_mcode_cli` 5 条 + `test_tdx` 16 条）+ `test_storage` 13 条
 
 - [ ] **Step 6: 实现复权因子落库（存储层扩展）**
 
@@ -1903,16 +2150,23 @@ Task 2 的 `src/agaistock/storage/db.py` 按 Task 2 段的 SCHEMA 与 Interfaces
 - [ ] **Step 7: 冒烟验证真实调用（可选但强烈建议）**
 
 ```bash
-python -c "from agaistock.providers import tdx; p=tdx.fetch_kline('002378','0','4',5); print(len(p['Rows'])); print(p['Rows'][0]['Data']); print(p['Rows'][-1]['Data'])"
+python -c "from agaistock.providers import tdx; p=tdx.fetch_kline('002378','0','4',5); print(len(p['Rows'])); print(p['Rows'][0]['Data']); print(p['Rows'][-1]['Data']); print(p['Rows'][-1]['Close'])"
 ```
 
-Expected: `5` / `20261118` / `20261124`（**首早末晚 = 升序**）
+Expected: `5` / `20261118` / `20261124` / `42.66xxxx`（**首早末晚 = 升序**；Close 是**后复权**价，不是现价 15.54）
 
 ```bash
 python -c "from agaistock.providers import tdx; f=tdx.fetch_adjustment_factors('002378'); print(len(f)); print(f[0])"
 ```
 
 Expected: `14` / `{'ex_date': '2026-06-26', 'factor': 2.6, 'constant': 2.2552}`
+
+```bash
+python -c "from agaistock.providers import tdx; print(tdx.fetch_kline('002378','0','2',1)['Rows'][-1]['Close'])"
+```
+
+Expected: 30 分钟级别的 Close **也是后复权**（与日线同量级，≈ 42.6）——
+这一条是本次修正的关键：连接器自己的 `tqFlag:"2"` 在 30 分钟级别不生效。
 
 - [ ] **Step 8: Commit**
 
@@ -2090,7 +2344,12 @@ git commit -m "feat: tdx Rows to eastmoney kline format adapter"
 - Create: `tests/test_chanlun_engine.py`
 
 **Interfaces:**
-- Consumes: `tdx.fetch_kline`（Task 5，**后复权序列** `tqFlag="2"`）、`tdx_rows_to_em.rows_to_em_format`（Task 6）
+- Consumes: `tdx.fetch_kline`（Task 5，**后复权序列**）、`tdx_rows_to_em.rows_to_em_format`（Task 6）
+  - 复权口径由 provider 层收口（Global Constraint 16）：`fetch_kline` 返回的**三个级别都在后复权空间**。
+    连接器自己的 `tqFlag:"2"` 对 30 分钟级别不生效（实测 002378 m30 给 15.73、日线给 42.66），
+    provider 层已改为用不复权序列 + 复权因子自行重建，因此**本任务无需再关心复权**。
+  - 真实数据自检时，`levels.week.last_close` / `levels.day.last_close` / `levels.m30.last_close`
+    应当**同量级**（都约等于后复权现价 42.66 量级）。若 m30 明显小一个数量级，说明复权没生效。
 - Produces:
   - `agaistock.skills.anchor_chanlun.engine.LEVELS = {"week": "5", "day": "4", "m30": "2"}`
   - `agaistock.skills.anchor_chanlun.engine.LEVEL_ORDER = ("week", "day", "m30")`
@@ -2345,6 +2604,10 @@ git commit -m "feat: vendor chanlun core and three-level structure orchestration
     返回 `(findings, caveats)`。**纯函数**，不触网、不读盘。
     **只要产出 findings，就一定同时产出至少一条 caveat**（含常驻的结构性限制声明）——
     契约把「有发现却无限制声明」判为非法结论，`engine.run_one` 会把这类结论整条丢弃。
+    **价格空间**：`last_close` 与结构里的中枢上下沿（`ZD` / `ZG`）必须**在同一个价格空间**。
+    生产环境两者都是**后复权**（Global Constraint 16/18）。
+    本任务测试里用的 fixture 数字（`last_close 15.54`、中枢 `22.39~29.04`）是**前复权口径的示例值**，
+    只用于验证规则逻辑，**不是**真实后复权数值。
   - `signals.build_invalidation(structure: dict, last_close: float) -> list[ProposedInvalidation]`
     从中枢上下沿生成证伪位（`跌破 ZD`）与确认位（`站上 ZG`）。
     **不按 `dist_pct` 的远近过滤**：远在 +44% 的中枢下沿同样是有效失效位；
@@ -3491,7 +3754,9 @@ def fetch_last_close(symbol: str, setcode: str, structure: dict | None = None) -
         if isinstance(value, (int, float)) and value:
             price = float(value)
             row = _latest_factor_row(symbol)
-            return price if row is None else tdx.to_houfuquan(price, row)
+            # 换不到因子行就**不能**返回现价 —— 它不在后复权空间，
+            # 拿它去和后复权的中枢上下沿比会得出错误结论。返回 0.0 表示「未知」。
+            return 0.0 if row is None else tdx.to_houfuquan(price, row)
     return 0.0
 
 
