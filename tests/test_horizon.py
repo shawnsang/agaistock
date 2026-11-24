@@ -80,6 +80,37 @@ class HorizonTests(unittest.TestCase):
         self.assertIn("tier", plan_result)
         self.assertIn("checks", plan_result)
 
+    def test_explicit_review_at_on_an_allowed_offset_keeps_the_full_window(self):
+        # 档位里的天数是**交易日**偏移。显式传入的日期如果正好是
+        # `_trading_days_later(start, 10)` 的结果，就不该被误判成「不在档位内」
+        # 而把 40 天的窗口塌缩成 10 天。
+        result = plan(
+            {"symbol": "002378"},
+            [verdict_with_tier("a", "long")],
+            start="2026-11-24",
+            review_at="2026-12-08",  # 2026-11-24 起第 10 个交易日
+        )
+        self.assertEqual(result["review_at"], "2026-12-08")
+        # 窗口没被塌缩：末位不是 review_at 本身
+        self.assertNotEqual(result["allowed_window"][1], "2026-12-08")
+        self.assertEqual(result["allowed_window"][0], "2026-11-24")
+
+    def test_review_at_outside_the_allowed_offsets_falls_back_to_the_earliest(self):
+        # 越界的日期必须被拉回档位内最早的那个，而且 review_at 一定要落在
+        # allowed_window 之内（不能出现「返回的日期在自己的窗口之外」）。
+        result = plan(
+            {"symbol": "002378"},
+            [verdict_with_tier("a", "long")],
+            start="2026-11-24",
+            review_at="2027-02-01",
+        )
+        self.assertEqual(result["review_at"], "2026-12-08")
+        self.assertIn(result["review_at"], (
+            result["allowed_window"][0],
+            result["allowed_window"][1],
+        ))
+        self.assertEqual(result["allowed_window"][1], "2026-12-08")
+
 
 if __name__ == "__main__":
     unittest.main()

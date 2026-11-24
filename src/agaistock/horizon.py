@@ -55,6 +55,26 @@ def _trading_days_later(start: date, offset: int) -> date:
     return current
 
 
+def _trading_days_between(start: date, end: date) -> int:
+    """start 之后到 end（含）之间的交易日数，与 `_trading_days_later` 同口径。
+
+    **必须与 `_trading_days_later` 同口径**：档位里的天数是**交易日偏移**，
+    而 `(end - start).days` 是**日历日差**。两个口径混用时，
+    自动推导出来的那个日期（`_trading_days_later(start, 10)`）会因为
+    日历日差是 14 而不是 10，被误判成「不在允许档位内」。
+    """
+    if end <= start:
+        return 0
+    current = start
+    count = 0
+    while True:
+        current += timedelta(days=1)
+        if current > end:
+            return count
+        if current.weekday() < 5:
+            count += 1
+
+
 def _proposed_items(verdicts: list[ReviewVerdict]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for verdict in verdicts:
@@ -79,8 +99,13 @@ def plan(
     start_date = date.fromisoformat(start)
     if review_at:
         chosen = date.fromisoformat(review_at)
-        if allowed and not any((chosen - start_date).days == d for d in allowed):
+        # 用**交易日**偏移校验，不要用日历日差 —— 档位里的天数是交易日偏移。
+        offset = _trading_days_between(start_date, chosen)
+        if allowed and offset not in allowed:
+            # 用户指定的日期不在允许档位内 → 落到档位内最早的那个，
+            # 并同步收窄窗口，保证 review_at 一定落在 allowed_window 之内。
             allowed = (min(allowed),)
+            chosen = _trading_days_later(start_date, min(allowed))
     elif allowed:
         chosen = _trading_days_later(start_date, min(allowed))
     else:
