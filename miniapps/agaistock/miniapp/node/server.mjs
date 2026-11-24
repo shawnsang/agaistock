@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 
@@ -95,6 +96,213 @@ function sendJson(response, status, payload) {
   response.end(JSON.stringify(payload));
 }
 
+const REPO_ROOT = join(import.meta.dirname, '..', '..', '..', '..');
+const DEFAULT_DB = join(REPO_ROOT, 'data', 'agaistock.db');
+const KERNEL_TIMEOUT_MS = 180000;
+
+/**
+ * 调用 Python 内核 CLI。
+ *
+ * Node 侧不碰 sqlite —— 数据库的唯一入口是内核（主规格 D3：接入层是唯一接口）。
+ * 返回 {code, stdout, stderr}，不抛异常。
+ * 带超时：三级别取数 + 点评可能跑很久，超时按失败处理，避免请求永久挂住。
+ */
+export function runKernel(args) {
+  return new Promise((resolve) => {
+    const child = spawn('python', ['-m', 'agaistock.cli', ...args], {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        PYTHONPATH: join(REPO_ROOT, 'src'),
+        AGAISTOCK_DB: DEFAULT_DB,
+      },
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({ code: -1, stdout, stderr: `内核调用超时（${KERNEL_TIMEOUT_MS}ms）` });
+    }, KERNEL_TIMEOUT_MS);
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      finish({ code: -1, stdout: '', stderr: String(error.message) });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      finish({ code: code ?? -1, stdout, stderr });
+    });
+  });
+}
+
+function parseKernelJson(stdout) {
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 路由处理。
+ *
+ * 依赖全部由调用方显式注入：模块层级上没有任何宿主对象被捕获，
+ * 因此它既能在 start() 里跑，也能在测试里用 fake 依赖跑。
+ */
+export async function handleRoute(request, response, options = {}) {
+  const {
+    context = {},
+    clientEntry = '',
+    readObservations = async () => [],
+    writeObservations = async () => {},
+    parseObservation = async () => ({
+      ok: false,
+      error: 'UNAVAILABLE',
+      message: '解析能力不可用。',
+    }),
+    kernel = runKernel,
+    dbPath = DEFAULT_DB,
+  } = options;
+
+  const url = new URL(request.url ?? '/', 'http://miniapp.local');
+
+  if (request.method === 'GET' && url.pathname === '/dashboard') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(clientEntry);
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/status') {
+    sendJson(response, 200, {
+      ok: true,
+      agent: Boolean(context.agent),
+      capabilities: {
+        agentRun: context.capabilities?.has?.('agent.run') ?? null,
+        speechTranscribe: context.capabilities?.has?.('speech.transcribe') ?? null,
+        tool: context.capabilities?.has?.('tool') ?? null,
+        hostConnector: context.capabilities?.has?.('hostConnector') ?? null,
+      },
+      observationCount: await countObservations(kernel, dbPath, readObservations),
+    });
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/observations') {
+    // 观察库以内核为准（删除也走内核，行 id 必须是内核行 id）
+    const result = await kernel(['list', '--db', dbPath, '--json']);
+    const payload = parseKernelJson(result.stdout);
+    const items = Array.isArray(payload)
+      ? payload
+      : (payload && Array.isArray(payload.items) ? payload.items : []);
+    // 前端读的是 data.items —— 这里必须保持 {ok, items} 外壳
+    sendJson(response, 200, { ok: true, items });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/parse') {
+    const body = await readBody(request);
+    const rawText = typeof body.text === 'string' ? body.text.trim() : '';
+    if (!rawText) {
+      sendJson(response, 400, { ok: false, error: 'EMPTY_INPUT', message: '先说点什么，或直接输入文字。' });
+      return;
+    }
+    const result = await parseObservation(rawText);
+    sendJson(response, result.ok ? 200 : 422, result);
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/save') {
+    const body = await readBody(request);
+    const draft = body.draft && typeof body.draft === 'object' ? body.draft : null;
+    if (!draft) {
+      sendJson(response, 400, { ok: false, error: 'INVALID_DRAFT', message: '没有可保存的观察卡。' });
+      return;
+    }
+    const items = await readObservations();
+    const record = {
+      id: `obs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      createdAt: new Date().toISOString(),
+      rawText: typeof body.rawText === 'string' ? body.rawText : '',
+      draft: normalizeDraft(draft),
+    };
+    items.push(record);
+    await writeObservations(items);
+    sendJson(response, 200, { ok: true, id: record.id, total: items.length });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/review') {
+    const body = await readBody(request);
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+    if (!text) {
+      sendJson(response, 400, { ok: false, error: 'EMPTY_INPUT', message: '先说点什么。' });
+      return;
+    }
+    const result = await kernel([
+      'review',
+      '--symbol', String(body.symbol ?? ''),
+      '--name', String(body.name ?? ''),
+      '--text', text,
+      '--db', dbPath,
+      '--json',
+    ]);
+    if (result.code !== 0) {
+      sendJson(response, 422, {
+        ok: false,
+        error: 'KERNEL_FAILED',
+        message: (result.stderr || '').slice(-500) || `exit=${result.code}`,
+      });
+      return;
+    }
+    const payload = parseKernelJson(result.stdout);
+    if (!payload) {
+      sendJson(response, 422, { ok: false, error: 'KERNEL_BAD_OUTPUT', message: result.stdout.slice(-300) });
+      return;
+    }
+    sendJson(response, 200, payload);
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname.endsWith('/reviews')) {
+    const id = decodeURIComponent(url.pathname.slice('/api/observations/'.length, -'/reviews'.length));
+    const result = await kernel(['reviews', id, '--db', dbPath, '--json']);
+    const payload = parseKernelJson(result.stdout);
+    sendJson(response, 200, payload ?? { observation_id: id, items: [] });
+    return;
+  }
+
+  if (request.method === 'DELETE' && url.pathname.startsWith('/api/observations/')) {
+    const id = decodeURIComponent(url.pathname.slice('/api/observations/'.length));
+    const result = await kernel(['delete', id, '--db', dbPath, '--json']);
+    if (result.code !== 0) {
+      sendJson(response, 404, { ok: false, error: 'not_found', id });
+      return;
+    }
+    sendJson(response, 200, { ok: true, id });
+    return;
+  }
+
+  sendJson(response, 404, { error: 'not_found' });
+}
+
+async function countObservations(kernel, dbPath, readObservations) {
+  try {
+    const result = await kernel(['list', '--db', dbPath, '--json']);
+    const payload = parseKernelJson(result.stdout);
+    if (payload && Array.isArray(payload.items)) return payload.items.length;
+  } catch {
+    // 内核不可用：回落到旧 JSON 文件观察库
+  }
+  return (await readObservations()).length;
+}
+
 export async function start(context) {
   const dataDir = context.dataDir;
   await mkdir(dataDir, { recursive: true });
@@ -163,75 +371,18 @@ export async function start(context) {
   };
 
   const server = createServer((request, response) => {
-    void handle(request, response).catch(() => {
+    void handleRoute(request, response, {
+      context,
+      clientEntry,
+      readObservations,
+      writeObservations,
+      parseObservation,
+      kernel: runKernel,
+      dbPath: DEFAULT_DB,
+    }).catch(() => {
       if (!response.headersSent) sendJson(response, 500, { error: 'internal_error' });
     });
   });
-
-  async function handle(request, response) {
-    const url = new URL(request.url ?? '/', 'http://miniapp.local');
-
-    if (request.method === 'GET' && url.pathname === '/dashboard') {
-      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      response.end(clientEntry);
-      return;
-    }
-
-    if (request.method === 'GET' && url.pathname === '/api/status') {
-      sendJson(response, 200, {
-        ok: true,
-        agent: Boolean(context.agent),
-        capabilities: {
-          agentRun: context.capabilities?.has?.('agent.run') ?? null,
-          speechTranscribe: context.capabilities?.has?.('speech.transcribe') ?? null,
-          tool: context.capabilities?.has?.('tool') ?? null,
-          hostConnector: context.capabilities?.has?.('hostConnector') ?? null,
-        },
-        observationCount: (await readObservations()).length,
-      });
-      return;
-    }
-
-    if (request.method === 'GET' && url.pathname === '/api/observations') {
-      const items = await readObservations();
-      sendJson(response, 200, { ok: true, items: items.slice().reverse() });
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/parse') {
-      const body = await readBody(request);
-      const rawText = typeof body.text === 'string' ? body.text.trim() : '';
-      if (!rawText) {
-        sendJson(response, 400, { ok: false, error: 'EMPTY_INPUT', message: '先说点什么，或直接输入文字。' });
-        return;
-      }
-      const result = await parseObservation(rawText);
-      sendJson(response, result.ok ? 200 : 422, result);
-      return;
-    }
-
-    if (request.method === 'POST' && url.pathname === '/api/save') {
-      const body = await readBody(request);
-      const draft = body.draft && typeof body.draft === 'object' ? body.draft : null;
-      if (!draft) {
-        sendJson(response, 400, { ok: false, error: 'INVALID_DRAFT', message: '没有可保存的观察卡。' });
-        return;
-      }
-      const items = await readObservations();
-      const record = {
-        id: `obs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-        createdAt: new Date().toISOString(),
-        rawText: typeof body.rawText === 'string' ? body.rawText : '',
-        draft: normalizeDraft(draft),
-      };
-      items.push(record);
-      await writeObservations(items);
-      sendJson(response, 200, { ok: true, id: record.id, total: items.length });
-      return;
-    }
-
-    sendJson(response, 404, { error: 'not_found' });
-  }
 
   await new Promise((resolve, reject) => {
     const onError = (error) => reject(error);
