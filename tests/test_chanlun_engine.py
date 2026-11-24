@@ -1,13 +1,15 @@
-import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from agaistock.skills.anchor_chanlun import engine
 
+REQUESTED_PERIODS: list[str] = []
+
 
 def fake_kline(symbol, setcode, period, want_num=500):
-    """造一段可识别的合成 K 线（升序）。"""
+    """造一段可识别的合成 K 线（升序），并记录被请求的 period。"""
+    REQUESTED_PERIODS.append(period)
     rows = []
     for i in range(120):
         day = 1 + (i % 28)
@@ -23,6 +25,9 @@ def fake_kline(symbol, setcode, period, want_num=500):
 
 
 class ChanlunEngineTests(unittest.TestCase):
+    def setUp(self):
+        REQUESTED_PERIODS.clear()
+
     def test_vendor_scripts_are_present(self):
         scripts = engine.vendor_root() / "scripts"
         self.assertTrue((scripts / "chan_analyze.py").is_file())
@@ -32,6 +37,14 @@ class ChanlunEngineTests(unittest.TestCase):
         self.assertEqual(engine.LEVELS["week"], "5")
         self.assertEqual(engine.LEVELS["day"], "4")
         self.assertEqual(engine.LEVELS["m30"], "2")
+
+    def test_build_structure_requests_each_level_with_its_own_period(self):
+        with TemporaryDirectory() as tmp:
+            engine.build_structure(
+                "002378", "章源钨业", "0", Path(tmp), kline_fetcher=fake_kline
+            )
+        # 级别→period 的映射必须真的用到，不能只看 LEVELS 常量
+        self.assertEqual(REQUESTED_PERIODS, ["5", "4", "2"])
 
     def test_build_structure_produces_multi_level_payload(self):
         with TemporaryDirectory() as tmp:
@@ -63,6 +76,15 @@ class ChanlunEngineTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):
                 engine.load_analysis(Path(tmp), "day")
+
+    def test_run_script_failure_carries_the_upstream_reason(self):
+        # 上游脚本只用 print() 报原因（不写 stderr），所以失败消息必须带 stdout，
+        # 否则调用方只看到一个光秃秃的 exit code。
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError) as ctx:
+                engine._run_script("chan_analyze.py", Path(tmp), ["--level", "day"])
+        # 上游 vendor 已固定版本，这条断言锁住它的报错文案
+        self.assertIn("未找到 K 线文件", str(ctx.exception))
 
 
 if __name__ == "__main__":

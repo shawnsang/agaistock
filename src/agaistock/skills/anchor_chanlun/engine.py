@@ -18,6 +18,8 @@ from ...providers import tdx, tdx_rows_to_em
 LEVELS = {"week": "5", "day": "4", "m30": "2"}
 LEVEL_ORDER = ("week", "day", "m30")
 WANT_NUM = 500
+# 上游脚本单次分析的上限（连接器调用本身是 180s，这里留更宽的余量）
+SCRIPT_TIMEOUT = 300
 
 
 def vendor_root() -> Path:
@@ -33,10 +35,13 @@ def _run_script(script: str, work_dir: Path, extra: list[str]) -> None:
         encoding="utf-8",
         errors="replace",
         cwd=str(work_dir),
+        timeout=SCRIPT_TIMEOUT,
     )
     if result.returncode != 0:
+        # 上游脚本只用 print() 报告原因，**不写 stderr** —— 只看 stderr 会得到空消息。
+        detail = ((result.stdout or "") + (result.stderr or "")).strip()
         raise RuntimeError(
-            f"{script} 执行失败(exit={result.returncode}): {(result.stderr or '')[-800:]}"
+            f"{script} 执行失败(exit={result.returncode}): {detail[-800:]}"
         )
 
 
