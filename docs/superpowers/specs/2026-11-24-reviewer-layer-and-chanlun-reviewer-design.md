@@ -488,7 +488,7 @@ ReviewVerdict
 | 纪律四/八 顶背驰优先 | 任一级别 `signal` 含"顶背驰"且成立 | `CHAN_TOP_DIVERGENCE_OVERRIDES` | 位置与时机 | −12 |
 | 纪律二/二十一 方向冲突 | 用户 `direction` 与日线 `signal` 方向相反 | `CHAN_DIRECTION_CONFLICT` | 位置与时机 | −18 |
 | 纪律二十一 位置≠趋势 | `bias` 与 `trend_direction` 不一致 | `CHAN_POSITION_VS_TREND` | 位置与时机 | 0（info，caveat） |
-| 纪律二十二 中枢不贴近现价 | 该级别最近中枢距现价 > 15% | `CHAN_PIVOT_FAR_FROM_PRICE` | 位置与时机 | −3（提示降权） |
+| 纪律二十二 中枢不贴近现价 | 该级别最近中枢距现价 > 15% | `CHAN_PIVOT_FAR_FROM_PRICE` | 证伪条件 | −3（提示降权） |
 | 纪律二十二 旧中枢供给/支撑带 | `nearby_pivots` 中存在距现价 < 10% 的旧中枢 | `CHAN_NEARBY_SUPPLY_BAND` | 位置与时机 | −4 |
 | 中枢上下沿 | `nearby_pivots` 有 ZD/ZG | → `proposed_invalidation` | 证伪条件 | 0 |
 | 纪律十三 区间套未确认 | `interval_nesting.verdict == "unconfirmed"` | `CHAN_NESTING_UNCONFIRMED` | 位置与时机 | −6 |
@@ -497,7 +497,7 @@ ReviewVerdict
 | 纪律十四 基准退化 | 标注背驰日期与最新价新低/新高相距很远 | → caveat（需手工复算） | — | 0 |
 | 纪律二十四 窗口偏薄 | `window_verdict` ∈ {样本偏薄, 窗口偏短} | `CHAN_WINDOW_THIN` | 位置与时机 | −2 |
 | 纪律二十五 盘中未收盘 | 当日 K 线未收盘 | → caveat | — | 0 |
-| 纪律十七 现价在中枢内部 | 现价落入某个中枢区间 | `CHAN_PRICE_INSIDE_PIVOT` | 位置与时机 | −5 |
+| 纪律十七 现价在中枢内部 | 现价落入某个中枢区间 | `CHAN_PRICE_INSIDE_PIVOT` | 证伪条件 | −5 |
 | 纪律二十三 回调不创新低 | 结构呈 2 买形态但大级别无背书 | `CHAN_SECOND_BUY_NO_BACKING` | 位置与时机 | −6 |
 
 **不产生 finding、只进 `caveats` 的纪律**：一、三、五、六、七、十一、十六、十九、二十。
