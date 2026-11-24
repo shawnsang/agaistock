@@ -10,9 +10,11 @@ import re
 from dataclasses import replace
 from typing import Any
 
-from ...reviewers.contract import Finding
+from ...reviewers.contract import PROTECTED_FIELDS, Finding
 
-PROTECTED = ("code", "severity", "dimension", "delta", "evidence_ref")
+# 受保护字段只有一个来源：契约层已经定义了 PROTECTED_FIELDS。
+# 这里直接复用，不要各写一份 —— 两处分叉会让「哪些字段不许 LLM 改」变得不可控。
+PROTECTED = PROTECTED_FIELDS
 
 SYSTEM_PROMPT = (
     "你是股票复盘助手，负责把结构化发现改写成给投资者看的中文点评。"
@@ -70,7 +72,10 @@ def _matches_protected(original: Finding, item: dict[str, Any]) -> bool:
         current = getattr(original, field)
         proposed = item[field]
         if isinstance(current, list):
-            if list(proposed) != list(current):
+            # LLM 返回的必须是列表：
+            #   list(123) → TypeError（'int' object is not iterable），会穿透「任何异常都降级」的硬约束；
+            #   list("a") → ['a']，与原文 ['a'] 相等 → 字符串会被误判成「没篡改」而放行。
+            if not isinstance(proposed, list) or proposed != list(current):
                 return False
         elif proposed != current:
             return False
