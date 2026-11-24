@@ -2633,7 +2633,7 @@ with TemporaryDirectory() as t:
 
 Expected: 打印出 day 级别的 bias / signal 与共振档位。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/agaistock/skills tests/test_chanlun_engine.py
@@ -6271,7 +6271,7 @@ git commit -m "feat: mini app reviewer opinions, score breakdown, horizon and de
 - Consumes: 全部前置任务
 - Produces: 一份可复现的实测结论
 
-- [ ] **Step 1: 重新发布 Mini App**
+- [x] **Step 1: 重新发布 Mini App**
 
 ```bash
 node --check miniapps/agaistock/miniapp/node/server.mjs
@@ -6288,7 +6288,7 @@ miniapp { action: "open",    pluginId: "agaistock" }
 
 Expected: runtime `running`，open 成功。
 
-- [ ] **Step 2: 在 Browser 中验证全链路**
+- [x] **Step 2: 在 Browser 中验证全链路**
 
 用 `mcp_browser` 的 `inspect` 打开页面后：
 
@@ -6305,14 +6305,14 @@ Expected: runtime `running`，open 成功。
    - 「观察期」区显示日期与档位
 4. 查询 console 应无错误
 
-- [ ] **Step 3: 验证删除**
+- [x] **Step 3: 验证删除**
 
 1. 在观察库某行点「删除」→ 确认弹出提示
 2. 确认后该行从列表消失
 3. `python -m agaistock.cli list --db data/agaistock.db --include-deleted` 应能看到该行且标记为已删除
 4. `python -m agaistock.cli list --db data/agaistock.db` 不应包含它
 
-- [ ] **Step 4: 验证重启恢复**
+- [x] **Step 4: 验证重启恢复**
 
 ```bash
 miniapp { action: "publish", pluginId: "agaistock" }
@@ -6321,7 +6321,7 @@ miniapp { action: "open",    pluginId: "agaistock" }
 
 Expected: 观察库与点评结论仍在（持久化跨重启生效）
 
-- [ ] **Step 5: 跑全量测试**
+- [x] **Step 5: 跑全量测试**
 
 ```bash
 python -m unittest discover -s tests -t . -v
@@ -6338,14 +6338,14 @@ Expected: 全部通过。
 > `node --test` 必须用 glob 形式：目录形式在本机会报
 > `Cannot find module ...\miniapps\agaistock\test`。
 
-- [ ] **Step 6: 把实测结论写回设计文档**
+- [x] **Step 6: 把实测结论写回设计文档**
 
 在设计文档末尾追加一节「实测结论（2026-11-24）」，记录：实际取到的缠论结构摘要、实际产生的 findings 列表、评分与观察期输出、删除与重启恢复的验证结果、以及**任何与本设计不一致的实际行为**（不一致必须改设计，不能改事实）。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
-git add miniapps/agaistock/miniapp/client docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
+git add docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md docs/superpowers/specs/2026-11-24-stock-review-app-architecture.md docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md
 git commit -m "docs: record end-to-end verification results for reviewer layer"
 ```
 
@@ -6356,6 +6356,27 @@ git commit -m "docs: record end-to-end verification results for reviewer layer"
 > 首次实测（2026-11-24）暴露了两个阻塞缺陷 —— 安装后的插件包**不含 Python 内核**，
 > 且 `server.mjs` 的内核桥接路径在「插件不在仓库里」时全部落空，
 > 内核失败还被吞成「观察库为空」。这两个缺陷的修复见 Task 17。
+
+---
+
+**Task 16 完成注记（2026-11-24）**
+
+全部 7 个 Step 已实跑通过，结论写在设计文档 **§16「端到端实测结论（2026-11-24）」**。
+
+与本计划的三处偏离（**以实跑事实为准，已改设计**）：
+
+1. **Step 3 的 DB 路径不是 `data/agaistock.db`**：Task 17 之后运行数据落
+   `context.dataDir`（实测 `…\.minimax\v2\plugin-data\liveboards\agaistock\agaistock.db`）。
+   实跑时用**安装副本自带的内核**核对了软删除语义：
+   `list --include-deleted` 输出两行且被删行标「（已删除）」，默认 `list` 只输出一行。
+2. **Step 1 的 `miniapp publish` 必须给 `sourcePath`**：只给 `pluginId` 时发布的是
+   宿主缓存里的旧副本；实测 `restart` 也不能更新已安装副本（D29）。
+3. **Step 6 的产出位置**：不是追加一节，而是新增 **§16**（4 个子节），
+   并顺带把 §3.1 目录结构订正为 as-built、§15 交付清单勾选。
+
+**实测额外挖出并已修掉的缺陷**：安装包不含内核、内核失败被吞成空列表（Task 17）；
+GBK 编码崩溃、观察期落点可能落在周日（Task 18）；结构化观察没有落库、
+`reviewer_version` 空串（Task 19）。
 
 ---
 

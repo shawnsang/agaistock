@@ -135,16 +135,6 @@ class Reviewer:
 
 ```
 D:\workroom\agaistock\
-├── skills/                              ← 点评师（可插拔）
-│   ├── anchor_chanlun/                 ← 目录名用下划线（Python 模块名不能带连字符）
-│   │   ├── SKILL.md                     ← 点评规则说明 + 25 条纪律映射表
-│   │   ├── reviewer.py                  ← Reviewer 实现（入口）
-│   │   ├── rules.py                     ← 纯规则层：结构 + 观察卡 → findings（可单测）
-│   │   ├── wording.py                   ← LLM 措辞层
-│   │   └── vendor/chanlun-core/         ← 上游拷贝，保持可追溯
-│   │       ├── scripts/                 ← chan_analyze.py / chan_multi_level.py / ...
-│   │       └── references/              ← glossary.md / tdx-mcp-reference.md
-│   └── ...
 ├── src/agaistock/
 │   ├── providers/
 │   │   ├── tdx_rows_to_em.py            ← tdx_kline Rows → 东财格式（重写，见 §9.3）
@@ -154,13 +144,40 @@ D:\workroom\agaistock\
 │   │   ├── contract.py                  ← ReviewVerdict / ReviewContext 定义
 │   │   ├── registry.py                  ← 静态注册表 + 发现
 │   │   └── engine.py                    ← 调度、并发、落库
+│   ├── skills/                          ← 点评师（可插拔）
+│   │   └── anchor_chanlun/              ← 目录名用下划线（Python 模块名不能带连字符）
+│   │       ├── reviewer.py               ← Reviewer 实现（入口）
+│   │       ├── engine.py                 ← 结构构建（适配上游产物格式）
+│   │       ├── rules.py                  ← 纯规则层：结构 + 观察卡 → findings（可单测）
+│   │       ├── signals.py                ← proposed_invalidation / horizon_hint 生成
+│   │       ├── wording.py                ← LLM 措辞层
+│   │       └── vendor/chanlun-core/      ← 上游拷贝，保持可追溯（只读不改）
+│   │           ├── scripts/              ← chan_analyze.py / chan_multi_level.py / ...
+│   │           └── references/           ← glossary.md / tdx-mcp-reference.md
+│   ├── llm/client.py                    ← LLM 措辞调用（§10）
 │   ├── scoring.py                       ← 维度聚合（§5）
 │   ├── horizon.py                       ← 观察期（§6）
-│   ├── storage/
-│   │   └── db.py                        ← SQLite，含 reviews 表
-│   └── mcp/                             ← agaistock-mcp 的 MCP 工具暴露
+│   ├── config.py                        ← repo_root() / 配置加载
+│   ├── cli.py                           ← 唯一对外入口（stdin/stdout JSON）
+│   └── storage/
+│       └── db.py                        ← SQLite，含 reviews 表 + deleted_at
+├── config/
+│   ├── reviewers.json                   ← 点评师注册表（§3.2）
+│   └── scoring.json                     ← 五维与权重（§5.1）
+├── tools/sync-kernel.py                 ← 内核随包复制 + 漂移守卫（见 §16.2）
 └── miniapps/agaistock/                  ← Mini App（§8）
+    ├── miniapp/node/server.mjs          ← HTTP 路由 + 内核子进程桥
+    ├── miniapp/client/index.html        ← 页面
+    ├── miniapp/client/render.mjs        ← 渲染层（点评 / 评分 / 观察期 / 观察库）
+    ├── src/agaistock/**、config/**       ← 内核与配置的逐字节副本（随包走）
+    └── test/*.test.mjs                  ← node --test 用例
 ```
+
+**与初稿的三处偏离（以实现为准）**：
+
+1. **点评师放在 `src/agaistock/skills/` 下，而不是仓库根的 `skills/`**。理由：Mini App 的宿主会把插件包解到临时目录运行，业务内核必须随包走（§16.2）；点评师是内核的一部分，放在包内才能被内核 import。
+2. **没有适配层 `SKILL.md`**。本轮第一位点评师 `anchor-chanlun` 是内核内的 Python 包，不是 Host skill，因此不需要 skill 描述文件；上游的 `SKILL.md` 作为只读 vendor 资产保留（其 25 条判读纪律是规则层的来源）。
+3. **`src/agaistock/mcp/` 尚未实现**。本轮 MCP 暴露面只有 Mini App 的 Node 侧 HTTP 路由；`agaistock-mcp` 工具暴露列入下一轮。
 
 ### 3.2 注册表
 
@@ -662,12 +679,64 @@ ReviewVerdict
 
 ## 15. 本轮交付清单
 
-- [ ] `skills/anchor_chanlun/`（拷贝上游 + 新适配器 + 规则层 + 措辞层 + SKILL.md）
-- [ ] `src/agaistock/reviewers/`（契约 + 注册表 + 引擎）
-- [ ] `src/agaistock/storage/db.py`（`reviews` 表 + `deleted_at`）
-- [ ] `src/agaistock/scoring.py`（维度聚合 + `completeness`）
-- [ ] `src/agaistock/horizon.py`（档位上限 + checks）
-- [ ] `config/reviewers.json`、`config/scoring.json`
-- [ ] Mini App：点评展示 + 评分展示 + 删除（草稿清空 / 观察软删）
-- [ ] 单测：适配器 / 规则层 / 契约 / 评分 / 观察期
-- [ ] 端到端实测（002378）
+- [x] `src/agaistock/skills/anchor_chanlun/`（上游只读拷贝 + 适配层 engine/reviewer/rules/signals + 措辞层 wording）
+- [x] `src/agaistock/reviewers/`（契约 + 注册表 + 引擎）
+- [x] `src/agaistock/storage/db.py`（`reviews` 表 + `deleted_at`）
+- [x] `src/agaistock/scoring.py`（维度聚合 + `completeness`）
+- [x] `src/agaistock/horizon.py`（档位上限 + checks）
+- [x] `config/reviewers.json`、`config/scoring.json`
+- [x] Mini App：点评展示 + 评分展示 + 删除（草稿清空 / 观察软删）
+- [x] 单测：适配器 / 规则层 / 契约 / 评分 / 观察期
+- [x] 端到端实测（002378）→ 结论见 §16
+
+---
+
+## 16. 端到端实测结论（2026-11-24）
+
+在**真实安装副本**上跑完整闭环（`miniapp publish` → `miniapp open`，不是仓库直跑），标的 **002378 章源钨业**。
+
+### 16.1 实测结果
+
+| 环节 | 结果 |
+|---|---|
+| 解析 | 看多、信心 70%、**依据 5 条**（事实 2 · 假设 3）、证伪条件「钨价跌回去年年底的水平」 |
+| 落库 | 结构化观察写入 SQLite，`evidence_json` 5 项、`invalidation_json` 1 项（**逐字段校验后落库**，不是自由文本） |
+| 点评 | `anchor-chanlun` 产出 6 条 finding |
+| 评分 | **92 / 100**；被审维度只有「证伪条件 91（权重 0.25）」+「位置与时机 94（权重 0.15）」，**权重和 0.40** |
+| 无人点评 | 事实锚定 / 逻辑链条 / 一致性 三维标 `no_reviewer`，**不按 0 分计**，不进分母 |
+| 观察期 | 2026-12-01，档位 **event**，rationale「存在明确催化剂（明年上半年产量翻倍），按事件驱动锚定」 |
+| 到期检查项 | 6 条，**每条都带 rationale** |
+| 删除 | 确认弹窗 → `DELETE /api/observations/<id>` → 200；DB 层 `deleted_at` 置位，**行未被物理删除** |
+| 重启恢复 | `publish` 重解包 + runtime 重启后，观察行**仍在**（依据 / 信心 / 证伪条件齐全），已删行仍隐藏 |
+
+**口径确认**：这个 92 分的分母是 **0.40** 而不是 1.0。UI 必须显示 `score_denominator`，否则用户会把「只在两个维度上被评了 91 和 94」误读成「全面 92 分」。
+
+### 16.2 实测挖出的、必须写进设计的四条事实
+
+这四条都不是纸面推导出来的，只有装包实测才会暴露：
+
+| # | 事实 | 影响 |
+|---|---|---|
+| 1 | **宿主把插件包解到临时目录再跑**（实测 `C:\Users\shawn\AppData\Local\Temp\mavis-miniapp-XXXXXX\package\`），仓库里的 `src/` 根本不在运行路径上 | 内核必须随包走：采用「复制 + 逐字节漂移守卫」（`tools/sync-kernel.py` + `tests/test_kernel_vendor.py`），而不是把内核搬进插件包（会牵动 pyproject / editable 安装 / `repo_root()` 语义 / 数据目录位置，成本远大于收益） |
+| 2 | **`python -S` 是必需项，不是优化**：editable 安装的 meta-path finder 优先级高于 `PYTHONPATH`，不加 `-S` 时包内 `src/` 会被已安装的包截胡 | 顺带把「零第三方依赖」从口号变成运行时硬约束 |
+| 3 | **运行数据必须落 `context.dataDir`**（实测 `…\.minimax\v2\plugin-data\liveboards\agaistock\`），插件目录是安装产物、可能被覆盖或只读 | 数据库路径由 `server.mjs` 传入；实测插件包内**不含任何 `.db` 文件** |
+| 4 | **`miniapp restart` 不能更新已安装副本**，只会重启旧副本 | 更新已安装的 Mini App 必须 `miniapp publish` 再 `open`；实测首次 publish 前 `/render.mjs` 404、`/api/observations` 还返回旧 JSON 库结构 |
+
+### 16.3 实测修掉的缺陷（本轮新增任务）
+
+| 任务 | 缺陷 | 根因 |
+|---|---|---|
+| Task 17 | 安装包不自包含；内核失败被伪装成空列表 | 包内无内核；`countObservations` 回落到旧 JSON 观察库 |
+| Task 18 | GBK 编码崩溃（整轮点评作废，间歇性，3 次中招 1 次） | 连接器 `errors="replace"` 产出 U+FFFD → CLI 用 GBK stdout `print` JSON → `UnicodeEncodeError` |
+| Task 18 | 观察期落点可能落在**周日**且在允许窗口之外 | `review_at` 未推进到交易日 |
+| Task 19 | 结构化观察**没有落库**（解析出的依据 / 证伪条件丢失） | 接入层解析结果未进内核 |
+| Task 19 | 点评师 `reviewer_version` 为空串 | 空版本号未归一化 |
+
+### 16.4 本轮不做、留给下一轮
+
+- **观察版本链（`supersedes_id`）**：§6.3 要求「采纳」产生新版本行 + supersedes 关系，当前存储模型没有版本链，直接改数组会破坏「观察记录只追加不修改」的不变量 → **「采纳」按钮本轮禁用**并写明原因；启用「采纳」的前提是先建版本链。
+- `contract.py` 的 bool delta / 浅拷贝 / `duration_ms` 类型收紧
+- `engine.py` 的错误归因与失败路径丢字段
+- `persist()` 两条路径缺「提交进仓库」的测试锁定
+- `src/agaistock/mcp/` 的 MCP 工具暴露
+- 上游 `resonance` / `window_alignment` / `key_levels` 未接入（设计级，下一轮）

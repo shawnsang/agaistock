@@ -49,7 +49,7 @@
 | D10 | UI 载体 | **Mini App 优先于「对话驱动」**：垂直切片已端到端跑通，录入面直接落在 Mini App | 对话驱动无法承载"随时口述→即得卡片"的节奏；而 Mini App 无需自建 ASR、无需打包签名 |
 | D11 | 解析层 | 提示词守则 **6 条硬规则** + 确定性归一化层（`normalizeDraft`）兜底 | 模型会漂移；提示词单独不够，必须配一层可测的归一化 |
 | D12 | Stage 1 形态 | **可插拔的「点评师」层**；一位点评师 = 一个目录 + 一条注册记录；结论**全部落库**，一起进入评分与观察期 | 固定 skill 列表无法持续上新；结论不落库则认知档案无原料、用户看不到"当时怎么被评的"。详见 §5.2 与点评师设计文档 |
-| D13 | 维度口径 | 五维**固定**，新增维度须显式改 `config/scoring.yaml`；无点评师贡献的维度从加权平均中剔除并标注 `no_reviewer` | §5.6 的 Brier 校准要求跨期可比；隐式扩张维度会让早晚观察的分数不可比 |
+| D13 | 维度口径 | 五维**固定**，新增维度须显式改 `config/scoring.json`；无点评师贡献的维度从加权平均中剔除并标注 `no_reviewer` | §5.6 的 Brier 校准要求跨期可比；隐式扩张维度会让早晚观察的分数不可比 |
 
 ---
 
@@ -108,7 +108,7 @@
 ┌───────────────▼──────────────────────────────────────────┐
 │  引擎层：Skill Runtime                                      │
 │  调度 / 结构化输出校验 / 轨迹日志(Trajectory 式) / 多模型路由   │
-│  模型读 config/providers.yaml：DeepSeek / GLM-5.3 / MiniMax-M3   │
+│  模型读 config/providers.json：DeepSeek / GLM-5.3 / MiniMax-M3   │
 └───────────────┬──────────────────────────────────────────┘
                 │
 ┌───────────────▼──────────────────────────────────────────┐
@@ -231,7 +231,7 @@ Mini App `agaistock`（股票复盘教练）已构建、发布并在 MCode 中�
   1. MCode 的 Matrix Connector `connector__matrix__listen_audio`（本地文件需先 `mcode-tools upload_temp_url` 换成可访问 URL）
   2. 本地 Whisper / FunASR（完全离线，隐私最好）
   3. 任一支持音频的 OpenAI 兼容端点
-- **配置**：ASR 通道在 `config/providers.yaml` 中**单独声明**（`asr_provider` / `asr_model`），与分析用的 `analysis_provider` 分开，可分别切换。
+- **配置**：ASR 通道在 `config/providers.json` 中**单独声明**（`asr_provider` / `asr_model`），与分析用的 `analysis_provider` 分开，可分别切换。
 - **两条路径**：
   1. **Mini App 路径（已选定为主线，D10）**：直接用 Host 的 `window.mcode.miniapp.speech.transcribe`，无需自建 ASR provider。
      实测：能力探测 `speech.transcribe = true`；**真实麦克风链路尚未走通**（当前环境无麦克风输入），P0 必须补测（§4.3.1）。
@@ -364,7 +364,7 @@ Stage 1 被建模为**可插拔的「点评师」层**：一位点评师 = 一�
 | 位置与时机 | 15% | `anchor-7dim` + `anchor-chanlun` + `audit-timing` | 与资金阶段冲突 → -9 |
 | 一致性 | 15% | `audit-consistency` | 与 3 天前观察矛盾且未说明 → -7 |
 
-**维度集合固定**：新增维度必须显式改 `config/scoring.yaml`。理由：§5.6 的 Brier 校准统计要求跨期可比；若点评师可随意引入新维度，早期与后期观察的分数就不可比，校准曲线失去意义。
+**维度集合固定**：新增维度必须显式改 `config/scoring.json`。理由：§5.6 的 Brier 校准统计要求跨期可比；若点评师可随意引入新维度，早期与后期观察的分数就不可比，校准曲线失去意义。
 
 **聚合规则**：
 
@@ -511,38 +511,44 @@ class MarketDataProvider(Protocol):
 
 ### 6.5 模型与 Provider 配置
 
-**业务内核自带 `config/providers.yaml`，不读宿主的 `config.yaml`。**
+**业务内核自带 `config/providers.json`，不读宿主的 `config.yaml`。**
 理由：D3 决定业务内核不依赖任何宿主的私有文件结构，否则"换宿主不重写"的承诺就不成立。
 
-```yaml
-providers:
-  deepseek:
-    api: anthropic-messages
-    base_url: https://api.deepseek.com/anthropic
-    api_key: ${DEEPSEEK_API_KEY}
-    models: [deepseek-v4-pro, deepseek-flash]
-    supports_audio: false
-  minimax:
-    api: anthropic-messages
-    base_url: https://api.minimax.cn/anthropic
-    api_key: ${MINIMAX_API_KEY}
-    models: [MiniMax-M3, MiniMax-M3.1-Flash]
-    supports_audio: true
-  local:
-    api: openai-completions
-    base_url: http://127.0.0.1:11434/v1
-    models: [qwen2.5:14b]
-    supports_audio: false
-
-analysis_provider: deepseek
-analysis_model: deepseek-v4-pro
-asr_provider: minimax          # 必须 supports_audio: true
-asr_model: MiniMax-M3.1-Flash
+```json
+{
+  "providers": {
+    "deepseek": {
+      "api": "anthropic-messages",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "api_key": "${DEEPSEEK_API_KEY}",
+      "models": ["deepseek-v4-pro", "deepseek-flash"],
+      "supports_audio": false
+    },
+    "minimax": {
+      "api": "anthropic-messages",
+      "base_url": "https://api.minimax.cn/anthropic",
+      "api_key": "${MINIMAX_API_KEY}",
+      "models": ["MiniMax-M3", "MiniMax-M3.1-Flash"],
+      "supports_audio": true
+    },
+    "local": {
+      "api": "openai-completions",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "models": ["qwen2.5:14b"],
+      "supports_audio": false
+    }
+  },
+  "analysis_provider": "deepseek",
+  "analysis_model": "deepseek-v4-pro",
+  "asr_provider": "minimax",
+  "asr_model": "MiniMax-M3.1-Flash"
+}
 ```
 
+- `asr_provider` 选中的 provider **必须** `supports_audio: true`（上例为 `minimax`）。
 - `supports_audio: false` 的 provider 被 ASR 通道选中时，启动即报错（而非运行到一半失败）。
 - 提供 `agaistock import-models --from <mcode config.yaml>` 一次性把宿主已配置的 provider 条目导入进来，**导入后两者独立**，宿主升级不影响本项目。
-- 密钥只从环境变量读，**不入库、不写进 yaml**。
+- 密钥只从环境变量读，**不入库、不写进配置文件**。
 
 ### 6.6 现有连接器事实记录（2026-11-24 实测）
 
@@ -776,7 +782,7 @@ env:         { AGAISTOCK_HOME: "D:\\workroom\\agaistock" }
 
 **已定死、无需再问**（如有异议请指出）：
 - 观察记录**只追加不修改**，修订走新版本行 + `supersedes_id`（§7）
-- 评分五维**权重做成 `config/scoring.yaml`**，默认值见 §5.3
+- 评分五维**权重做成 `config/scoring.json`**，默认值见 §5.3
 - ASR 与分析模型**分两条独立通道**（§5.0）；DeepSeek 只能做分析模型，不能做 ASR
 - 业务内核**自带 provider 配置**，不读宿主 `config.yaml`（§6.5）
 - **P0 主数据源 = 通达信 MCP**（D5、§6.3），无需再比较 iFinD / Tushare
