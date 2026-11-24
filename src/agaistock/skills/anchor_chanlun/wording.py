@@ -126,25 +126,31 @@ def phrase(
     except Exception:  # noqa: BLE001 —— 措辞层失败必须降级，不能影响判定
         return list(findings)
 
-    payload = _extract_json(raw)
-    if not payload:
+    # 从这里开始的每一步都在处理**不可信的外部输入**（LLM 的原始返回）。
+    # 任何一处意外都必须降级成规则层原文，不能让异常穿透到点评师 ——
+    # 否则整轮点评会变成 status="error"，连规则层已经算好的 findings 一起丢掉。
+    try:
+        payload = _extract_json(raw)
+        if not payload:
+            return list(findings)
+
+        items = payload.get("items")
+        if not isinstance(items, list):
+            return list(findings)
+
+        by_code = {item.get("code"): item for item in items if isinstance(item, dict)}
+
+        result = []
+        for finding in findings:
+            item = by_code.get(finding.code)
+            if not isinstance(item, dict) or not _matches_protected(finding, item):
+                result.append(finding)
+                continue
+            new_claim = str(item.get("claim") or "").strip()
+            if not new_claim:
+                result.append(finding)
+                continue
+            result.append(replace(finding, claim=new_claim))
+        return result
+    except Exception:  # noqa: BLE001 —— 措辞层失败必须降级，不能影响判定
         return list(findings)
-
-    items = payload.get("items")
-    if not isinstance(items, list):
-        return list(findings)
-
-    by_code = {item.get("code"): item for item in items if isinstance(item, dict)}
-
-    result = []
-    for finding in findings:
-        item = by_code.get(finding.code)
-        if not isinstance(item, dict) or not _matches_protected(finding, item):
-            result.append(finding)
-            continue
-        new_claim = str(item.get("claim") or "").strip()
-        if not new_claim:
-            result.append(finding)
-            continue
-        result.append(replace(finding, claim=new_claim))
-    return result
