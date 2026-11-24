@@ -3549,6 +3549,30 @@ class WordingTests(unittest.TestCase):
         result = wording.phrase([finding()], {"thesis": "t"}, llm=Boom())
         self.assertEqual(result[0].claim, "原始表述")
 
+    def test_non_list_evidence_ref_is_treated_as_tampering_not_a_crash(self):
+        # LLM 输出是不可信输入：evidence_ref 给成数字时 list(123) 会抛 TypeError，
+        # 穿透「任何异常都必须降级」的硬约束 —— 整轮点评会因此变成 status=error，
+        # 连规则层的 findings 一起丢掉。必须判为篡改并退回原文。
+        llm = FakeLlm(
+            '{"items":[{"code":"CHAN_DAY_TOP_DIVERGENCE","evidence_ref":123,"claim":"改写"}]}'
+        )
+        result = wording.phrase([finding()], {"thesis": "t"}, llm=llm)
+        self.assertEqual(result[0].claim, "原始表述")
+        self.assertEqual(result[0].evidence_ref, ["chan.levels.day.signal"])
+
+    def test_string_evidence_ref_is_treated_as_tampering(self):
+        # list("a") == ['a']，与原文恰好相等 → 字符串会被误判成「没篡改」而放行。
+        llm = FakeLlm(
+            '{"items":[{"code":"CHAN_DAY_TOP_DIVERGENCE","evidence_ref":"a","claim":"改写"}]}'
+        )
+        result = wording.phrase([finding()], {"thesis": "t"}, llm=llm)
+        self.assertEqual(result[0].claim, "原始表述")
+
+    def test_protected_fields_come_from_the_contract(self):
+        # 受保护字段只能有一个来源，否则两处分叉就没人说得清「哪些字段不许 LLM 改」。
+        from agaistock.reviewers import contract
+        self.assertEqual(tuple(wording.PROTECTED), tuple(contract.PROTECTED_FIELDS))
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -3663,9 +3687,11 @@ import re
 from dataclasses import replace
 from typing import Any
 
-from ...reviewers.contract import Finding
+from ...reviewers.contract import PROTECTED_FIELDS, Finding
 
-PROTECTED = ("code", "severity", "dimension", "delta", "evidence_ref")
+# 受保护字段只有一个来源：契约层已经定义了 PROTECTED_FIELDS。
+# 这里直接复用，不要各写一份 —— 两处分叉会让「哪些字段不许 LLM 改」变得不可控。
+PROTECTED = PROTECTED_FIELDS
 
 SYSTEM_PROMPT = (
     "你是股票复盘助手，负责把结构化发现改写成给投资者看的中文点评。"
@@ -3723,7 +3749,10 @@ def _matches_protected(original: Finding, item: dict[str, Any]) -> bool:
         current = getattr(original, field)
         proposed = item[field]
         if isinstance(current, list):
-            if list(proposed) != list(current):
+            # LLM 返回的必须是列表：
+            #   list(123) → TypeError（'int' object is not iterable），会穿透「任何异常都降级」的硬约束；
+            #   list("a") → ['a']，与原文 ['a'] 相等 → 字符串会被误判成「没篡改」而放行。
+            if not isinstance(proposed, list) or proposed != list(current):
                 return False
         elif proposed != current:
             return False
@@ -3806,7 +3835,7 @@ def phrase(
 python -m unittest tests.test_wording tests.test_llm_client -v
 ```
 
-Expected: 6 tests PASS
+Expected: 10 tests PASS
 
 - [ ] **Step 6: Commit**
 
@@ -4220,6 +4249,21 @@ class ScoringTests(unittest.TestCase):
         entry = next(e for e in result["score_breakdown"] if e["dimension"] == "位置与时机")
         self.assertEqual(entry["contributions"][0]["finding_codes"], ["CHAN_X"])
 
+    def test_contribution_exposes_the_applied_delta_so_raw_can_be_reconciled(self):
+        # 主规格 §5.3：每一分必须可追溯到具体 Finding。
+        # 只给未缩放的 delta 时，weight != 1 的情况下展示层算不平 raw。
+        verdicts = [verdict("a", "位置与时机", -12)]
+        result = scoring.aggregate(verdicts, reviewer_weights={"a": 0.5}, dimensions=DIMENSIONS)
+        entry = next(e for e in result["score_breakdown"] if e["dimension"] == "位置与时机")
+        contribution = entry["contributions"][0]
+        self.assertEqual(contribution["delta"], -12)
+        self.assertEqual(contribution["applied_delta"], -6)
+        # raw 必须等于 100 + 各 contribution 的 applied_delta 之和
+        self.assertEqual(
+            entry["raw"],
+            100 + sum(c["applied_delta"] for c in entry["contributions"]),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -4282,7 +4326,11 @@ def aggregate(
             contributions.append({
                 "reviewer_id": verdict.reviewer_id,
                 "finding_codes": [f.code for f in matched],
+                # delta 是这条 finding 自己的分值；applied_delta 是乘上点评师权重后
+                # 真正计入 raw 的值。两者都要给：主规格 §5.3 要求「每一分必须可追溯到
+                # 具体 Finding」，展示层若只用 delta 去解释 raw，weight != 1 时算不平。
                 "delta": delta,
+                "applied_delta": delta * reviewer_weight,
                 "weight": reviewer_weight,
             })
 
@@ -4327,7 +4375,7 @@ def aggregate(
 python -m unittest tests.test_scoring -v
 ```
 
-Expected: 6 tests PASS
+Expected: 7 tests PASS
 
 - [ ] **Step 5: Commit**
 
@@ -4348,7 +4396,10 @@ git commit -m "feat: dimension scoring aggregation with completeness tracking"
 - Consumes: `ReviewVerdict`（Task 3）
 - Produces:
   - `agaistock.horizon.TIER_ALLOWED = {"short": (3, 5), "mid": (5, 10, 20), "long": (10, 20, 40), "event": (5, 10, 20)}`
-  - `agaistock.horizon.TIER_ORDER = ("short", "mid", "long", "event")`（由严到宽）
+  - `agaistock.horizon.TIER_ORDER = ("short", "mid", "event", "long")`（由严到宽）
+    —— 顺序按**允许窗口**排，不按字母直觉：`event` 的窗口 (5,10,20) 与 `mid` 相同，
+    都比 `long` 的 (10,20,40) 保守，所以 `event` 必须排在 `long` 前面。
+    （Task 8 的 `signals.TIER_RANK` 用的是同一套语义：event 与 mid 同 rank。）
   - `agaistock.horizon.resolve_tier(verdicts: list[ReviewVerdict]) -> tuple[str | None, list[str]]`
     返回 `(档位, 各点评师给出的原始档位列表)`；多点评师取**最保守**。
   - `agaistock.horizon.plan(observation: dict, verdicts: list[ReviewVerdict], start: str, review_at: str | None = None) -> dict`
@@ -4439,6 +4490,37 @@ class HorizonTests(unittest.TestCase):
         self.assertIn("tier", plan_result)
         self.assertIn("checks", plan_result)
 
+    def test_explicit_review_at_on_an_allowed_offset_keeps_the_full_window(self):
+        # 档位里的天数是**交易日**偏移。显式传入的日期如果正好是
+        # `_trading_days_later(start, 10)` 的结果，就不该被误判成「不在档位内」
+        # 而把 40 天的窗口塌缩成 10 天。
+        result = plan(
+            {"symbol": "002378"},
+            [verdict_with_tier("a", "long")],
+            start="2026-11-24",
+            review_at="2026-12-08",  # 2026-11-24 起第 10 个交易日
+        )
+        self.assertEqual(result["review_at"], "2026-12-08")
+        # 窗口没被塌缩：末位不是 review_at 本身
+        self.assertNotEqual(result["allowed_window"][1], "2026-12-08")
+        self.assertEqual(result["allowed_window"][0], "2026-11-24")
+
+    def test_review_at_outside_the_allowed_offsets_falls_back_to_the_earliest(self):
+        # 越界的日期必须被拉回档位内最早的那个，而且 review_at 一定要落在
+        # allowed_window 之内（不能出现「返回的日期在自己的窗口之外」）。
+        result = plan(
+            {"symbol": "002378"},
+            [verdict_with_tier("a", "long")],
+            start="2026-11-24",
+            review_at="2027-02-01",
+        )
+        self.assertEqual(result["review_at"], "2026-12-08")
+        self.assertIn(result["review_at"], (
+            result["allowed_window"][0],
+            result["allowed_window"][1],
+        ))
+        self.assertEqual(result["allowed_window"][1], "2026-12-08")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -4514,6 +4596,26 @@ def _trading_days_later(start: date, offset: int) -> date:
     return current
 
 
+def _trading_days_between(start: date, end: date) -> int:
+    """start 之后到 end（含）之间的交易日数，与 `_trading_days_later` 同口径。
+
+    **必须与 `_trading_days_later` 同口径**：档位里的天数是**交易日偏移**，
+    而 `(end - start).days` 是**日历日差**。两个口径混用时，
+    自动推导出来的那个日期（`_trading_days_later(start, 10)`）会因为
+    日历日差是 14 而不是 10，被误判成「不在允许档位内」。
+    """
+    if end <= start:
+        return 0
+    current = start
+    count = 0
+    while True:
+        current += timedelta(days=1)
+        if current > end:
+            return count
+        if current.weekday() < 5:
+            count += 1
+
+
 def _proposed_items(verdicts: list[ReviewVerdict]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for verdict in verdicts:
@@ -4538,8 +4640,13 @@ def plan(
     start_date = date.fromisoformat(start)
     if review_at:
         chosen = date.fromisoformat(review_at)
-        if allowed and not any((chosen - start_date).days == d for d in allowed):
+        # 用**交易日**偏移校验，不要用日历日差 —— 档位里的天数是交易日偏移。
+        offset = _trading_days_between(start_date, chosen)
+        if allowed and offset not in allowed:
+            # 用户指定的日期不在允许档位内 → 落到档位内最早的那个，
+            # 并同步收窄窗口，保证 review_at 一定落在 allowed_window 之内。
             allowed = (min(allowed),)
+            chosen = _trading_days_later(start_date, min(allowed))
     elif allowed:
         chosen = _trading_days_later(start_date, min(allowed))
     else:
@@ -4593,7 +4700,7 @@ def plan(
 python -m unittest tests.test_horizon -v
 ```
 
-Expected: 7 tests PASS
+Expected: 9 tests PASS
 
 - [ ] **Step 5: Commit**
 
@@ -4966,7 +5073,7 @@ if __name__ == "__main__":
 python -m unittest tests.test_cli -v
 ```
 
-Expected: 8 tests PASS
+Expected: 10 tests PASS
 
 - [ ] **Step 5: 真实跑一遍（关键一步）**
 
@@ -5627,6 +5734,42 @@ test('renderHorizon shows tier and review date', () => {
   assert.match(html, /顶背驰/);
 });
 
+test('renderScore says 未评分 instead of 0 when no dimension was scored', () => {
+  // 「无人点评 ≠ 0 分」：一个维度都没被审过时显示「0 / 100」会被读成「总分很差」，
+  // 与设计文档 §5.2 的口径正好相反。
+  const html = renderScore({
+    total: 0,
+    score_breakdown: [
+      { dimension: '事实锚定', weight: 0.25, raw: null, weighted: null, completeness: 'no_reviewer', contributions: [] },
+      { dimension: '证伪条件', weight: 0.25, raw: null, weighted: null, completeness: 'no_reviewer', contributions: [] },
+    ],
+    scored_dimensions: [],
+    score_denominator: 0,
+  });
+  assert.match(html, /未评分/);
+  assert.doesNotMatch(html, /0\s*<\/span>\s*\/ 100/);
+});
+
+test('renderHorizon shows the check rationale', () => {
+  // 中枢在头顶时「跌破下沿」的条件已经成立，只作结构参考 —— rationale 必须显示，
+  // 否则用户会把它当成待触发的失效条件。
+  const html = renderHorizon({
+    tier: 'mid',
+    review_at: '2026-12-01',
+    rationale: '按中期档',
+    checks: [
+      {
+        desc: '跌破 day 中枢下沿 60.47',
+        comparator: 'below',
+        tolerance: 0.5,
+        rationale: 'day 中枢位于现价上方，跌破下沿属于已发生的事实，只作结构失效参考',
+      },
+    ],
+  });
+  assert.match(html, /跌破 day 中枢下沿 60\.47/);
+  assert.match(html, /只作结构失效参考/);
+});
+
 test('renderObservationRows renders kernel observation rows', () => {
   const html = renderObservationRows([
     {
@@ -5727,6 +5870,7 @@ export function renderReviews(reviews) {
 
 export function renderScore(score) {
   if (!score) return '';
+  const denominator = Number(score.score_denominator ?? 0);
   const rows = (score.score_breakdown || []).map((entry) => {
     if (entry.completeness === 'no_reviewer') {
       return `<tr class="dim-empty">
@@ -5748,7 +5892,9 @@ export function renderScore(score) {
   }).join('');
 
   return `
-    <div class="score-total"><span class="num">${escapeHtml(Math.round(score.total ?? 0))}</span> / 100</div>
+    ${denominator > 0
+      ? `<div class="score-total"><span class="num">${escapeHtml(Math.round(score.total ?? 0))}</span> / 100</div>`
+      : '<div class="score-total muted">本次无人点评，未评分</div>'}
     <p class="muted">本次被审维度：${escapeHtml((score.scored_dimensions || []).join('、') || '无')}
        （权重和 ${escapeHtml(score.score_denominator ?? 0)}）</p>
     <table class="score-table">
@@ -5759,7 +5905,12 @@ export function renderScore(score) {
 
 export function renderHorizon(plan) {
   if (!plan) return '';
-  const checks = (plan.checks || []).map((c) => `<li>${escapeHtml(c.desc)}</li>`).join('');
+  // rationale 必须一起显示：中枢在头顶时「跌破下沿」的条件**已经成立**，
+  // 只作结构参考、不作为本次的失效判定 —— 不显示 rationale 会被读成待触发的失效条件。
+  const checks = (plan.checks || []).map((c) => `<li>
+      <span>${escapeHtml(c.desc)}</span>
+      ${c.rationale ? `<div class="muted check-rationale">${escapeHtml(c.rationale)}</div>` : ''}
+    </li>`).join('');
   return `
     <div class="horizon-main">
       <strong>${escapeHtml(plan.review_at)}</strong>
@@ -6047,9 +6198,12 @@ Expected: 全部通过。
 - [ ] **Step 7: Commit**
 
 ```bash
-git add -A
+git add miniapps/agaistock/miniapp/client docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
 git commit -m "docs: record end-to-end verification results for reviewer layer"
 ```
+
+> **不要用 `git add -A`**（Global Constraint 14）：实测过程中可能有并行子代理的中间文件，
+> 一把全加会把别人的半成品一起提交。只 add 上面这两个路径。
 
 ---
 
