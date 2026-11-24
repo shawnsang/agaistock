@@ -4514,6 +4514,28 @@ class CliTests(unittest.TestCase):
             # 措辞层必须真的接上：ctx.llm 拿到 from_env() 的返回值
             self.assertIs(captured["ctx"].llm, sentinel)
 
+    def test_review_closes_the_db_connection_even_when_the_command_fails(self):
+        # Windows 上未关闭的 sqlite 句柄会锁住 .db 文件（临时目录删除直接 PermissionError）。
+        # 连接必须在 finally 里关 —— 命令中途抛异常时同样要关。
+        conn = mock.MagicMock()
+        with mock.patch.object(cli, "_open", return_value=conn), \
+             mock.patch.object(cli.registry, "load_reviewers",
+                               side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                cli.main([
+                    "review", "--symbol", "002378", "--name", "章源钨业",
+                    "--text", "还能拿半年", "--db", "unused.db", "--json",
+                ])
+        conn.close.assert_called_once_with()
+
+    def test_list_closes_the_db_connection_even_when_it_fails(self):
+        conn = mock.MagicMock()
+        with mock.patch.object(cli, "_open", return_value=conn), \
+             mock.patch.object(cli.db, "list_observations", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                cli.main(["list", "--db", "unused.db", "--json"])
+        conn.close.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -4604,90 +4626,98 @@ def run_reviewers(ctx, reviewers):  # pragma: no cover - 便于测试打桩
 
 def cmd_review(args) -> int:
     conn = _open(args.db)
-    observation = _parse_observation(args.symbol, args.name, args.text)
-    observation_id = db.insert_observation(conn, observation)
+    try:
+        observation = _parse_observation(args.symbol, args.name, args.text)
+        observation_id = db.insert_observation(conn, observation)
 
-    reviewers = registry.load_reviewers()
-    ctx = engine_mod.ReviewContext(
-        observation=observation,
-        symbol=args.symbol,
-        name=args.name,
-        now=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        data_dir=config.repo_root() / "data",
-        # 措辞层接线：环境变量没配全时 from_env() 返回 None → 点评保留规则层原文
-        llm=llm_client.from_env(),
-    )
-    verdicts = run_reviewers(ctx, reviewers)
-    saved = engine_mod.persist(conn, observation_id, verdicts)
+        reviewers = registry.load_reviewers()
+        ctx = engine_mod.ReviewContext(
+            observation=observation,
+            symbol=args.symbol,
+            name=args.name,
+            now=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            data_dir=config.repo_root() / "data",
+            # 措辞层接线：环境变量没配全时 from_env() 返回 None → 点评保留规则层原文
+            llm=llm_client.from_env(),
+        )
+        verdicts = run_reviewers(ctx, reviewers)
+        saved = engine_mod.persist(conn, observation_id, verdicts)
 
-    weights = {r["id"]: float(r.get("weight", 1.0)) for r in reviewers}
-    score = scoring.aggregate(verdicts, reviewer_weights=weights)
-    plan = horizon_mod.plan(observation, verdicts, start=date.today().isoformat())
+        weights = {r["id"]: float(r.get("weight", 1.0)) for r in reviewers}
+        score = scoring.aggregate(verdicts, reviewer_weights=weights)
+        plan = horizon_mod.plan(observation, verdicts, start=date.today().isoformat())
 
-    payload = {
-        "observation_id": observation_id,
-        "reviews": saved,
-        "score": score,
-        "horizon": plan,
-    }
-    if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-    else:
-        print(f"观察 {observation_id}：{observation['name']} {observation['symbol']}")
-        print(f"评分 {score['total']:.1f} / 100（被审维度：{'、'.join(score['scored_dimensions']) or '无'}）")
-        print(f"观察期 {plan['review_at']}（档位 {plan['tier'] or '默认'}）")
-        for verdict in saved:
-            print(f"- {verdict['reviewer_id']} [{verdict['status']}] {len(verdict['findings'])} 条发现")
-    # 显式关闭连接：Windows 上未关闭的 sqlite 句柄会锁住 .db 文件，
-    # 临时目录清理与后续迁移都会失败（临时目录删除直接报 PermissionError）。
-    conn.close()
-    return 0
+        payload = {
+            "observation_id": observation_id,
+            "reviews": saved,
+            "score": score,
+            "horizon": plan,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(f"观察 {observation_id}：{observation['name']} {observation['symbol']}")
+            print(f"评分 {score['total']:.1f} / 100（被审维度：{'、'.join(score['scored_dimensions']) or '无'}）")
+            print(f"观察期 {plan['review_at']}（档位 {plan['tier'] or '默认'}）")
+            for verdict in saved:
+                print(f"- {verdict['reviewer_id']} [{verdict['status']}] {len(verdict['findings'])} 条发现")
+        return 0
+    finally:
+        # 显式关闭连接：Windows 上未关闭的 sqlite 句柄会锁住 .db 文件，
+        # 临时目录清理与后续迁移都会失败（临时目录删除直接报 PermissionError）。
+        # **必须放 finally** —— 命令中途抛异常（配置坏了、点评师炸了）时句柄同样会锁住文件。
+        conn.close()
 
 
 def cmd_list(args) -> int:
     conn = _open(args.db)
-    rows = db.list_observations(conn, include_deleted=args.include_deleted)
-    if args.json:
-        # 带 ok/items 外壳：Mini App 前端读的是 data.items（见 Task 14 / Task 15）
-        print(json.dumps({"ok": True, "items": rows}, ensure_ascii=False, indent=2))
-    else:
-        for row in rows:
-            marker = "（已删除）" if row.get("deleted_at") else ""
-            print(f"{row['id']}  {row.get('created_at')}  {row.get('name')} {row.get('symbol')}{marker}")
-    conn.close()
-    return 0
+    try:
+        rows = db.list_observations(conn, include_deleted=args.include_deleted)
+        if args.json:
+            # 带 ok/items 外壳：Mini App 前端读的是 data.items（见 Task 14 / Task 15）
+            print(json.dumps({"ok": True, "items": rows}, ensure_ascii=False, indent=2))
+        else:
+            for row in rows:
+                marker = "（已删除）" if row.get("deleted_at") else ""
+                print(f"{row['id']}  {row.get('created_at')}  {row.get('name')} {row.get('symbol')}{marker}")
+        return 0
+    finally:
+        conn.close()
 
 
 def cmd_reviews(args) -> int:
     conn = _open(args.db)
-    items = db.latest_reviews(conn, args.observation_id)
-    payload = {"observation_id": args.observation_id, "items": items}
-    if args.json:
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-    else:
-        for item in items:
-            verdict = item.get("verdict") or {}
-            print(f"{item['reviewer_id']} [{item['status']}] {len(verdict.get('findings') or [])} 条发现")
-    conn.close()
-    return 0
+    try:
+        items = db.latest_reviews(conn, args.observation_id)
+        payload = {"observation_id": args.observation_id, "items": items}
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            for item in items:
+                verdict = item.get("verdict") or {}
+                print(f"{item['reviewer_id']} [{item['status']}] {len(verdict.get('findings') or [])} 条发现")
+        return 0
+    finally:
+        conn.close()
 
 
 def cmd_delete(args) -> int:
     conn = _open(args.db)
-    ok = db.soft_delete_observation(conn, args.observation_id)
-    if not ok:
+    try:
+        ok = db.soft_delete_observation(conn, args.observation_id)
+        if not ok:
+            if args.json:
+                print(json.dumps({"ok": False, "id": args.observation_id}, ensure_ascii=False))
+            else:
+                print(f"未找到或已删除：{args.observation_id}", file=sys.stderr)
+            return 1
         if args.json:
-            print(json.dumps({"ok": False, "id": args.observation_id}, ensure_ascii=False))
+            print(json.dumps({"ok": True, "id": args.observation_id}, ensure_ascii=False))
         else:
-            print(f"未找到或已删除：{args.observation_id}", file=sys.stderr)
+            print(f"已软删除 {args.observation_id}（不参与评分与校准统计）")
+        return 0
+    finally:
         conn.close()
-        return 1
-    if args.json:
-        print(json.dumps({"ok": True, "id": args.observation_id}, ensure_ascii=False))
-    else:
-        print(f"已软删除 {args.observation_id}（不参与评分与校准统计）")
-    conn.close()
-    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -4739,7 +4769,7 @@ if __name__ == "__main__":
 python -m unittest tests.test_cli -v
 ```
 
-Expected: 6 tests PASS
+Expected: 8 tests PASS
 
 - [ ] **Step 5: 真实跑一遍（关键一步）**
 
