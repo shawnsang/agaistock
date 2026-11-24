@@ -8612,6 +8612,411 @@ git commit -m "fix: guard the host data dir wiring and make the kernel env herme
 
 ---
 
+### Task 20 · fix round 2 — 把「调用点字面量」护栏换成**行为**护栏
+
+> **来源**：Task 20 fix round 1 的 scoped 复审（verifier）—— **PASS-WITH-NITS**，
+> 0 Critical / 0 Important，但有 **3 个 Minor + 3 个 Nit**。
+> 控制器已独立复核每个结论（评审方的变异脚本在 `.tmp\task20-fix-review\`，控制器自己又跑了一轮）。
+
+> **控制器已预验证本节**：本节的代码被抽到沙盒副本
+> （`.tmp\task20-fix2\sandbox\agaistock\`）**实跑过** —— 原型 58 条测试全绿；
+> 再打上 13 组变异（M8/M9/M14/M15/M16/C4 + 7 组额外回归形态），
+> **13 组全部被护栏捕获，且每组红的是护栏集合里的测试**（不是无关测试碰巧红）。
+> 实现时若测试名与本节写法一致，这套判据可直接复用。
+
+**Minor 1（headline）：fix round 1 的源码断言只锚定「调用点字面量存在」，没有验证数据流。**
+
+评审方自己写的变异脚本给出 17 组结果，其中 **6 组漏过**（57/57 全绿）：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| M8 | `start()` 保留 helper 调用，但在 `runKernel` 处 `{...kernelOptions, dataDir: pluginRoot}` | **漏过** |
+| M9 | 同上，改为覆写 `dbPath` | **漏过** |
+| M14 | `start()` 里 `delete kernelOptions.dataDir` | **漏过** |
+| M15 | `start()` 里 `kernelOptions.dataDir = pluginRoot` | **漏过** |
+| M16 | `start()` 里 `kernelOptions.dbPath = join(pluginRoot,'agaistock.db')` | **漏过** |
+| C4 | 诱饵：保留 helper 调用但丢弃结果，真正用的是手写 options | **漏过** |
+
+**M8/M14/M15 会把内核的 `AGAISTOCK_DATA_DIR` 指回插件目录 —— 正是 Task 20 要消灭的那个缺陷复活。**
+评审方用真实内核子进程证实了 M8 的危害：
+
+```
+pristine : {"AGAISTOCK_DATA_DIR": "D:\\host\\data", "AGAISTOCK_DB": "D:\\host\\data\\agaistock.db"}
+M8 形态  : {"AGAISTOCK_DATA_DIR": "D:\\pkg"}   ← 插件目录
+```
+
+**根因**：`buildKernelOptions(context, pluginRoot)` 返回一个**中间对象**，
+`start()` 把它交给 `runKernel`。在这个中间对象上做的任何改动，行为断言都看不见 ——
+fix round 1 的三条测试全都测的是**纯函数**，没有一个测到「`start()` 实际怎么用它」。
+
+**Minor 2**：§16.4 新增限制的括号写「源码断言……**只能挡住本仓库内的改动**」——
+这句**高估了护栏**：M14/M15/M16 正是本仓库内的改动，且全部漏过。
+
+**Minor 3**：计划里的「`package/data/chanlun/002378/` 下有 **9 个文件**」**数字错了** ——
+上游脚本产出集合是 **8** 个（`kline_<level>`×3 + `chan_analysis_<level>`×3 + `chan_analysis.json` +
+`chan_multi_level.json`）。控制器复核：宿主 `dataDir\chanlun\002378\` 实测 **8** 个，
+`src/agaistock/data/chanlun/002378/`（仓库里那份）实测也是 **8** 个。
+且该句引用的证据「安装副本里 `.pyc` 的 mtime 与仓库里的一致」**在现存安装副本上不成立**
+（安装副本 24 个 `.pyc`，与仓库 mtime 相同的 **0** 个）。
+
+**Nit 3**：fix round 1 的 hermeticity 测试 `finally` 是 `delete process.env.*`，
+会抹掉运行者本已存在的 ambient 值（应该**保存 → 还原**）。
+
+**Nit 4**：`start()` 与 `buildKernelOptions` 各自读了一次 `context.dataDir`，将来只改一处就会分叉。
+
+**Nit 5**：计划里指向 `.tmp/task20-fix/check_m6_m7.py` —— 该文件被 `.gitignore` 忽略，不在仓库里。
+
+---
+
+**修法：取消「中间对象」，让 env 由 context 直接算出，并把护栏换成三条行为断言。**
+
+- `buildKernelEnv(context, pluginRoot)` —— **唯一一处决定内核运行路径的地方**，直接吃 context。
+- `runKernel(args, context, pluginRoot, spawnFn)` —— env 在**最后一次**从 context 算出，
+  中间没有任何可被覆写的对象。`spawnFn` 作为注入点，让测试能观测到**真实**子进程收到的 env。
+- `start(context, deps)` —— `deps.createKernel` 是注入点，测试能观测到 `start()` 递给内核的
+  context / pluginRoot / dbPath **原样**。
+- 删掉 `buildKernelOptions` 与 fix round 1 那条源码断言（它们验证不了数据流）。
+
+**Files:**
+- Modify: `miniapps/agaistock/miniapp/node/server.mjs`
+- Modify: `miniapps/agaistock/test/api.test.mjs`
+- Modify: `docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md`
+- Modify: `docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md`
+
+**Interfaces:**
+- Consumes: `context.dataDir`、`context.pluginRoot`（宿主给的）
+- Produces:
+  - `kernelDbPath(context) -> string` —— **一处**算出数据库路径
+  - `buildKernelEnv(context, pluginRoot) -> object` —— 内核子进程的最终 env
+  - `runKernel(args, context, pluginRoot, spawnFn)` —— `spawnFn` 是注入点
+  - `start(context, deps)` —— `deps.createKernel` 是注入点；返回值多一个 `port`
+
+- [ ] **Step 1: 改测试（RED）**
+
+> ⚠️ **本步必须先处理 fix round 1 留下的旧测试**，否则 import 里的 `buildKernelOptions`
+> 消失会**让整个测试文件加载失败**（57 条全红），而不是「按预期红」。
+
+**1a) 改 import（第 6 行）**：
+
+```javascript
+import { handleRoute, buildKernelEnv, kernelDbPath, runKernel, start } from '../miniapp/node/server.mjs';
+```
+
+**1b) 删掉两条依赖 `buildKernelOptions` 的旧测试**：
+
+- `test('the kernel options carry the host data dir, not the plugin dir', ...)` —— 整个删掉
+  （`buildKernelOptions` 本轮被删除，功能由 `kernelDbPath` + `buildKernelEnv` 接管）。
+- `test('start() wires the kernel through buildKernelOptions', ...)` —— 整个删掉
+  （它是 fix round 1 的**源码断言**护栏，正是本轮要消灭的东西）。
+
+**1c) 改写两条还活着的旧测试**（签名变了）：
+
+- `test('the kernel env is decided by the options, not by the host environment', ...)`
+  → 新签名是 `buildKernelEnv(context, pluginRoot)`，原来的 `buildKernelEnv({ dbPath, dataDir })`
+  **不再合法**（`dbPath` 不再是入参）。改成：
+
+```javascript
+test('the kernel env is decided by the host context, not by the host environment', () => {
+  // 宿主环境里残留同名变量时，内核也**不能**继承它 —— 否则宿主一个旧路径
+  // 就能把内核写到别处（曾经让本文件两条断言在 ambient env 下 fail 2）。
+  // ⚠️ finally 必须**保存 → 还原**，不能直接 delete —— delete 会抹掉运行者
+  // 本来就有的 ambient 值（fix round 1 的 Nit 3）。
+  const previousDir = process.env.AGAISTOCK_DATA_DIR;
+  const previousDb = process.env.AGAISTOCK_DB;
+  process.env.AGAISTOCK_DATA_DIR = 'D:\\ambient\\host\\data';
+  process.env.AGAISTOCK_DB = 'D:\\ambient\\host\\data\\agaistock.db';
+  try {
+    const bare = buildKernelEnv({}, 'D:\\pkg');
+    assert.equal(bare.AGAISTOCK_DATA_DIR, undefined);
+    assert.equal(bare.AGAISTOCK_DB, undefined);
+    const explicit = buildKernelEnv({ dataDir: 'D:\\x' }, 'D:\\pkg');
+    assert.equal(explicit.AGAISTOCK_DATA_DIR, 'D:\\x');
+    assert.equal(explicit.AGAISTOCK_DB, join('D:\\x', 'agaistock.db'));
+  } finally {
+    if (previousDir === undefined) delete process.env.AGAISTOCK_DATA_DIR;
+    else process.env.AGAISTOCK_DATA_DIR = previousDir;
+    if (previousDb === undefined) delete process.env.AGAISTOCK_DB;
+    else process.env.AGAISTOCK_DB = previousDb;
+  }
+});
+```
+
+- `test('the kernel gets the host data dir, not the installed package dir', ...)`、
+  `test('the kernel env never invents a data dir on its own', ...)`、
+  `test('a blank data dir is not a usable path', ...)` —— **三条都保留**，
+  但签名要补上第二个参数 `pluginRoot`（不传也能过，默认值是 `PLUGIN_ROOT`；
+  显式传 `D:\\pkg` 更好断言）：
+
+```javascript
+test('the kernel gets the host data dir, not the installed package dir', () => {
+  const env = buildKernelEnv({ dataDir: 'D:\\host\\data' }, 'D:\\pkg');
+  assert.equal(env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
+  assert.equal(env.AGAISTOCK_DB, 'D:\\host\\data\\agaistock.db');
+});
+
+test('the kernel env never invents a data dir on its own', () => {
+  const env = buildKernelEnv({}, 'D:\\pkg');
+  assert.equal(env.AGAISTOCK_DATA_DIR, undefined);
+});
+
+test('a blank data dir is not a usable path', () => {
+  const env = buildKernelEnv({ dataDir: '' }, 'D:\\pkg');
+  assert.equal(env.AGAISTOCK_DATA_DIR, undefined);
+});
+```
+
+**1d) 在文件末尾追加三条**行为护栏测试（加上 1c 里改写的那条 ambient 测试，
+这一层一共四条行为断言，覆盖三层：env 纯函数 / 真实 spawn 路径 / `start()` 注入点）：
+
+```javascript
+// ---- 内核运行路径的三层行为护栏 ----
+// 上一轮的护栏只锚在「调用点字面量存在」，没验证数据流：把 helper 的结果在
+// 传给 runKernel 之前覆写掉，测试照样全绿（评审方用 M8 复现过，会把内核的
+// AGAISTOCK_DATA_DIR 指回插件目录）。这四条全部改成**行为断言**。
+
+test('the kernel env puts both runtime paths in the host data dir', () => {
+  const env = buildKernelEnv({ dataDir: 'D:\\host\\data' }, 'D:\\pkg');
+  assert.equal(env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
+  assert.equal(env.AGAISTOCK_DB, kernelDbPath({ dataDir: 'D:\\host\\data' }));
+  assert.equal(env.AGAISTOCK_DB, join('D:\\host\\data', 'agaistock.db'));
+  assert.equal(env.PYTHONPATH, join('D:\\pkg', 'src'));
+});
+
+test('the kernel subprocess actually receives the host data dir', async () => {
+  // 走真实的 runKernel 路径，只把 spawn 换掉 —— 观测子进程**真的**收到的 env。
+  const captured = [];
+  const fakeChild = {
+    stdout: { on() {} },
+    stderr: { on() {} },
+    kill() {},
+    on(event, handler) {
+      if (event === 'close') setImmediate(() => handler(0));
+    },
+  };
+  await runKernel(
+    ['list', '--db', 'x.db', '--json'],
+    { dataDir: 'D:\\host\\data' },
+    'D:\\pkg',
+    (command, argv, options) => {
+      captured.push({ command, argv, env: options.env });
+      return fakeChild;
+    },
+  );
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
+  assert.equal(captured[0].env.AGAISTOCK_DB, join('D:\\host\\data', 'agaistock.db'));
+  assert.equal(captured[0].env.PYTHONPATH, join('D:\\pkg', 'src'));
+});
+
+test('start() hands the host context to the kernel unchanged', async () => {
+  // 堵住「在 helper 之后覆写」这一类：只要 start() 递给内核的不是宿主给的
+  // context 原样，这条就红。start() 若绕过 createKernel 直接调 runKernel，
+  // 下面的 seen 会是空的 —— 一样红。
+  const seen = [];
+  const pluginRoot = join(import.meta.dirname, '..');
+  const dataDir = join(import.meta.dirname, '..', '..', '..', '.tmp', 'task20-fix2-test-data');
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  const handle = await start(context, {
+    createKernel: (ctx, root, dbPath) => (args) => {
+      seen.push({ ctx, root, dbPath, args });
+      return Promise.resolve({ code: 0, stdout: '{"items":[]}', stderr: '' });
+    },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/observations`);
+    assert.equal(response.status, 200);
+  } finally {
+    await handle.dispose();
+  }
+  assert.ok(seen.length > 0, '内核必须真的被调用，且拿到宿主给的 context');
+  assert.equal(seen[0].ctx.dataDir, dataDir);
+  assert.equal(seen[0].root, pluginRoot);
+  assert.equal(seen[0].dbPath, join(dataDir, 'agaistock.db'));
+});
+```
+
+> `import.meta.dirname` 在本文件里指向 `miniapps/agaistock/test/`，所以 `join(import.meta.dirname, '..')`
+> 就是插件根 `miniapps/agaistock`；`start()` 会从那里读 `miniapp/client/index.html` 与
+> `miniapp/client/render.mjs`（真实文件都在）。`listen.port = 0` 让 OS 分配一个空闲端口；
+> `start()` 的返回值里新增了 `port` 字段，测试要用它拼 URL（Node ≥18 有全局 `fetch`，
+> 本仓库 Node 24）。
+> `dataDir` 用仓库根 `.tmp/` 下的目录 —— `start()` 会 `mkdir` 它，测试跑完可留着（`.tmp/` 已 gitignore）。
+
+- [ ] **Step 2: `server.mjs` 改造成 context 驱动**
+
+**a) 新增 `kernelDbPath`，并把 `buildKernelEnv` 改成吃 context：**
+
+```javascript
+/**
+ * 内核数据库路径 —— **一处**说了算。
+ *
+ * 数据库与缠论分析工作目录都必须落宿主给的数据目录（`context.dataDir`），
+ * 不能落插件目录（安装产物，可能被重装覆盖，也可能只读安装）。
+ */
+export function kernelDbPath(context = {}) {
+  return context.dataDir ? join(context.dataDir, 'agaistock.db') : '';
+}
+
+/**
+ * 内核子进程的环境变量 —— **唯一一处决定内核运行路径的地方**。
+ *
+ * 直接吃宿主的 context：调用方**拿不到**中间对象，也就无法在传给内核之前
+ * 把路径改成别的（上一轮正是栽在这里：源码断言只看得到「调用点字面量」，
+ * 看不到数据流）。
+ *
+ * 内核的运行路径**只由宿主的 context 决定**：宿主环境里残留的同名变量一律
+ * 先清掉，否则宿主一个旧路径就能把内核写到别处。
+ */
+export function buildKernelEnv(context = {}, pluginRoot = PLUGIN_ROOT) {
+  const env = {
+    ...process.env,
+    PYTHONPATH: join(pluginRoot, 'src'),
+    PYTHONIOENCODING: 'utf-8',
+  };
+  delete env.AGAISTOCK_DB;
+  delete env.AGAISTOCK_DATA_DIR;
+  if (context.dataDir) {
+    env.AGAISTOCK_DB = kernelDbPath(context);
+    env.AGAISTOCK_DATA_DIR = context.dataDir;
+  }
+  return env;
+}
+```
+
+> ⚠️ **保留 `const KERNEL_SRC = join(PLUGIN_ROOT, 'src');`** ——
+> 现有测试 `runKernel resolves the kernel from the plugin bundle, not the repo`
+> 断言这条字面量存在，删了它那条测试会红（那条测试本身是好的，它守的是
+> 「插件根推导方式」而不是「路径映射」）。
+> `kernelDbPath` 的 `context.dataDir` 为空时返回 `''`（不是抛错）——
+> `join(undefined, ...)` 会抛 TypeError，宿主少给一个字段就崩在启动路径上不合适。
+
+**b) `runKernel` 改成吃 context，并把 `spawn` 变成注入点：**
+
+```javascript
+export function runKernel(args, context = {}, pluginRoot = PLUGIN_ROOT, spawnFn = spawn) {
+  const cwd = pluginRoot;
+  const env = buildKernelEnv(context, pluginRoot);
+  return new Promise((resolve) => {
+    // **必须带 `-S`**：editable 安装（`pip install -e .`）注册的是 meta-path finder，
+    // 优先级**高于** PYTHONPATH —— 实测开发机上不加 `-S` 时 `import agaistock`
+    // 命中的是仓库里那份，不是插件自带的副本，自包含就成了空话。
+    // `-S` 同时禁用 site-packages，正好把「业务内核零第三方依赖」（Global Constraint 2）
+    // 从约定变成运行时硬约束：内核一旦依赖第三方包，Mini App 会立刻报错而不是
+    // 悄悄依赖用户机器上的环境。
+    const child = spawnFn('python', ['-S', '-m', 'agaistock.cli', ...args], {
+      cwd,
+      env,
+      encoding: 'utf8',
+    });
+    ...（其余不变：stdout/stderr 收集、超时、close/error 处理）
+  });
+}
+```
+
+**c) 删掉 `buildKernelOptions`**（它的职责被 `buildKernelEnv` + `kernelDbPath` 接管，
+中间对象正是这一轮要消灭的东西）。
+
+**d) `handleRoute` 的默认 kernel**：原来是 `kernel = runKernel`，新签名下会丢掉 dataDir。
+→ 改成解构后兜底：
+
+```javascript
+  const {
+    context = {},
+    ...
+    kernel: injectedKernel,
+    dbPath = '',
+    dataDir = '',
+  } = options;
+  // 默认内核也走 context 驱动：只有宿主给了 dataDir 才带上运行路径。
+  const kernel = injectedKernel || ((args) => runKernel(args, { dataDir }));
+```
+
+**e) `start(context, deps)`**：
+
+```javascript
+export async function start(context, deps = {}) {
+  ...
+  // 运行数据落宿主给的数据目录，**不是**插件目录 ——
+  // 插件目录是安装产物（可能被只读安装、也可能被 Host 重装覆盖），
+  // dataDir 才是运行时可写、跨重启保留的数据位置。
+  // 数据库路径由 kernelDbPath 一处说了算（不再有可被覆写的中间对象）。
+  const dbPath = kernelDbPath(context);
+
+  // 内核工厂可注入：测试要能观测 start() 到底把什么递给了内核。
+  // 默认实现把**宿主的 context 原样**传给 runKernel —— 中间不再有任何
+  // 可被改写路径的对象，上一轮的缺陷（M8/M9/M14/M15/M16）因此无处可藏。
+  const createKernel = deps.createKernel
+    || ((ctx, root) => (args) => runKernel(args, ctx, root));
+  const kernel = createKernel(context, pluginRoot, dbPath);
+  ...
+  return { dispose, port: server.address()?.port };
+}
+```
+
+> `server.address()` 在 listen 完成后才有值；`start()` 里已经 `await` 过 listen，
+> 所以直接取即可。`port` 是给测试拼 URL 用的，宿主只解构 `{ dispose }` 不受影响。
+> `dbPath` **只算一次**（fix round 1 的 Nit 4：两处各读一遍 `context.dataDir`，
+> 将来只改一处就会分叉）。
+
+- [ ] **Step 3: 文档订正（Minor 2 / Minor 3 + 3 个 Nit）**
+
+1. **设计文档 §16.4** 的括号：「源码断言……只能挡住本仓库内的改动」→
+   改成如实描述现在的三层行为护栏（env 纯函数 / 真实 spawn 路径 / `start()` 注入点），
+   并保留「宿主侧回归仍挡不住」这一条。
+2. **设计文档 §3.1** 的 `__pycache__` 说明：把「只读安装时 CPython 容忍 `.pyc` 写失败」
+   这句**尚未独立复现**的历史结论标出来（Windows 的只读属性不阻断写入，
+   要 POSIX 只读安装才能验），别把它写成已验证事实。
+3. **计划 Task 20 小节**（约 8143 行）：「实测 9 个文件」→ **8 个**；
+   并把「宿主会把 gitignored 产物一并拷进安装副本（`.pyc` mtime 与仓库里一致）」这句
+   **换掉**——控制器已复核：安装副本 24 个 `.pyc`，与仓库 mtime 相同的 **0** 个；
+   可复现的证据是**时序**：安装副本解包于 `2026-11-24T21:59:05Z`，
+   而 `package/src/agaistock/providers/__pycache__/mcode_cli.cpython-311.pyc`
+   的 mtime 是 `2026-11-24T22:00:32Z` —— **晚于解包 87 秒** ⇒ 确证是运行时写的。
+   **不要**再声称「宿主把 gitignored 产物拷进安装副本」。
+4. **计划里指向 `.tmp/task20-fix/check_m6_m7.py` 的地方**（约 8389、8589 行）：
+   注明「仅本地脚本，被 `.gitignore` 忽略，不在仓库里」。
+5. **计划 fix round 1 小节**（约 8381 行）：加一句「本小节**已被 fix round 2 取代**
+   （`buildKernelOptions` 与那条源码断言都删了）」，免得后来人照着 round 1 的写法实现。
+
+- [ ] **Step 4: 跑全量测试**
+
+```bash
+python -m unittest discover -s tests -t .
+node --test "miniapps/agaistock/test/*.test.mjs"
+node --check miniapps/agaistock/miniapp/node/server.mjs
+node tools\check-spec.mjs docs\superpowers\plans\2026-11-24-reviewer-layer-and-chanlun-reviewer.md --external docs\superpowers\specs\2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md --external docs\superpowers\specs\2026-11-24-stock-review-app-architecture.md
+```
+
+**额外的封闭性验证（必做）**：
+
+```bash
+$env:AGAISTOCK_DATA_DIR='D:\ambient\host\data'; node --test "miniapps/agaistock/test/*.test.mjs"
+```
+
+预期：**全绿**。
+
+**并重跑评审方的 17 组变异**：评审方的脚本在 `.tmp\task20-fix-review\`（本地，不在仓库里）。
+控制器会另外提供一份 `.tmp\task20-fix2\mutations.py`（含 M8/M9/M14/M15/M16/C4 这 6 组漏过的），
+预期：**六组全部被捕获**。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/test/api.test.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md
+git commit -m "fix: guard the kernel runtime paths with behavioural assertions" -- miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/test/api.test.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md
+```
+
+> **不要用 `git add -A`**（Global Constraint 14）。
+> 本轮**不改** `src/agaistock/**` —— 若确实需要改内核源码，必须先跑
+> `python tools/sync-kernel.py` 并把内核副本一起提交。
+
+---
+
 ---
 
 ## Appendix A: 常用命令速查
