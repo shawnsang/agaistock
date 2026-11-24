@@ -2648,6 +2648,8 @@ git commit -m "feat: vendor chanlun core and three-level structure orchestration
     从中枢上下沿生成证伪位（`跌破 ZD`）与确认位（`站上 ZG`）。
     **不按 `dist_pct` 的远近过滤**：远在 +44% 的中枢下沿同样是有效失效位；
     「邻近带」只用于 `rules.py` 的 `CHAN_NEARBY_SUPPLY_BAND` 规则。
+    `last_close <= 0` 表示**现价未知**（取不到可比的现价）——此时措辞必须是中性的
+    「现价未知，跌破 ZD 即视为判断错误」，**不得**说成「跌破下沿属于已发生的事实」。
   - `signals.build_horizon_hint(observation: dict, structure: dict, findings: list[Finding], last_close: float = 0.0) -> HorizonHint`
   - 规则常量：`rules.RULE_DELTAS`（code → delta 的映射表，便于集中调参与锁定语义）
 
@@ -2829,6 +2831,20 @@ class SignalsTests(unittest.TestCase):
         ]
         hint = signals.build_horizon_hint(BULLISH, st, [], last_close=15.54)
         self.assertTrue(hint.checks)
+
+    def test_build_invalidation_with_unknown_last_close_does_not_claim_it_already_broke(self):
+        # last_close <= 0 = 现价未知。此时不能说「跌破下沿属于已发生的事实」。
+        st = structure()
+        st["levels"]["day"]["nearby_pivots"] = [
+            {"from": "2026-02-05", "to": "2026-09-22", "ZD": 22.39, "ZG": 29.04,
+             "role": "recent", "dist_pct": 44.08}
+        ]
+        items = signals.build_invalidation(st, 0.0)
+        self.assertTrue(items)
+        for item in items:
+            self.assertNotIn("已发生的事实", item.rationale)
+            if item.comparator == "below":
+                self.assertIn("现价未知", item.rationale)
 
 
 if __name__ == "__main__":
@@ -3123,7 +3139,14 @@ def _levels(structure: dict[str, Any]) -> dict[str, Any]:
 
 
 def _position(last_close: float, zd: float, zg: float) -> str:
-    """现价相对中枢的位置：above / inside / below。"""
+    """现价相对中枢的位置：above / inside / below / unknown。
+
+    `last_close <= 0` 表示**现价未知**（取不到可比的现价，例如复权因子缺失导致
+    无法把实时行情换算到后复权空间）。这时不能假装现价在中枢下方 ——
+    那会让文案说出「跌破下沿属于已发生的事实」这种假话。
+    """
+    if last_close <= 0:
+        return "unknown"
     if last_close > zg:
         return "above"
     if last_close >= zd:
@@ -3133,6 +3156,11 @@ def _position(last_close: float, zd: float, zg: float) -> str:
 
 def _below_rationale(level_name: str, position: str, zd: float, zg: float) -> str:
     """跌破中枢下沿的含义随现价位置而变，写清楚才不会被误读。"""
+    if position == "unknown":
+        return (
+            f"现价未知（取不到可比的现价），跌破 {level_name} 中枢下沿 {zd} "
+            f"（中枢区间 {zd}~{zg}）即视为判断错误"
+        )
     if position == "inside":
         return f"价格跌出 {level_name} 中枢下沿 {zd} 即视为判断错误"
     if position == "above":
@@ -3239,7 +3267,7 @@ def build_horizon_hint(
 python -m unittest tests.test_chanlun_rules -v
 ```
 
-Expected: 18 tests PASS（`RulesTests` 11 条 + `SignalsTests` 7 条）
+Expected: 19 tests PASS（`RulesTests` 11 条 + `SignalsTests` 8 条）
 
 - [ ] **Step 6: Commit**
 
