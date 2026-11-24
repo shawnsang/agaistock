@@ -7982,25 +7982,50 @@ def _load_structured_observation(path: str | None, symbol: str, name: str, text:
                 "invalidation": ["钨价跌回去年年底的水平"],
                 "timeframe": "半年", "trigger": "明年上半年产量翻倍",
             }, ensure_ascii=False), encoding="utf-8")
-            code = cli.main([
-                "review", "--symbol", "002378", "--name", "章源钨业",
-                "--text", "还能拿半年", "--observation-file", str(draft_path),
-                "--db", str(db_path), "--json",
-            ])
+            # 本文件**没有** review 的既有用例（review 会连真实行情源、很慢），
+            # 这里把点评师列表 mock 成空 —— 只验「草稿被内核接收并落库」。
+            with mock.patch.object(cli.registry, "load_reviewers", return_value=[]):
+                code = cli.main([
+                    "review", "--symbol", "002378", "--name", "章源钨业",
+                    "--text", "还能拿半年", "--observation-file", str(draft_path),
+                    "--db", str(db_path), "--json",
+                ])
             self.assertEqual(code, 0)
-            rows = db.list_observations(db.connect(db_path))
+            conn = db.connect(db_path)
+            rows = db.list_observations(conn)
+            conn.close()
             self.assertEqual(rows[0]["confidence"], 0.75)
             self.assertEqual(rows[0]["invalidation"], ["钨价跌回去年年底的水平"])
             self.assertEqual(rows[0]["thesis"], "钨价上涨叠加产量翻倍")
+            self.assertEqual(rows[0]["evidence"][0]["type"], "fact")
 
     def test_structured_observation_clamps_confidence(self):
         # 草稿里的信心越界要被夹住，不能直接进库。
-        ...
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            draft_path = Path(tmp) / "draft.json"
+            draft_path.write_text(
+                json.dumps({"confidence": 3.5, "direction": "看多"}), encoding="utf-8"
+            )
+            with mock.patch.object(cli.registry, "load_reviewers", return_value=[]):
+                code = cli.main([
+                    "review", "--symbol", "002378", "--text", "还能拿半年",
+                    "--observation-file", str(draft_path),
+                    "--db", str(db_path), "--json",
+                ])
+            self.assertEqual(code, 0)
+            conn = db.connect(db_path)
+            rows = db.list_observations(conn)
+            conn.close()
+            self.assertEqual(rows[0]["confidence"], 1.0)
+            # direction 非法（"看多" 不是 bullish/bearish/neutral）→ 退回关键词解析
+            self.assertIn(rows[0]["direction"], ("bullish", "bearish", "neutral"))
 ```
 
-（`tests/test_cli.py` 需要 `from agaistock.storage import db`；`review` 命令会真的
-跑一遍点评师 —— 测试里要像现有用例那样把点评师换掉或用 `--db` 指向临时库，
-具体做法照抄本文件里已有的 `review` 用例。）
+> `mock` 与 `json` 本文件已经 import 了；`db` 用 `from agaistock.storage import db`
+> 在方法内 import。`cli.registry` 是 `agaistock.reviewers.registry` 模块（cli 里 `from .reviewers import registry`），
+> 用 `mock.patch.object(cli.registry, "load_reviewers", return_value=[])` 把它 mock 成空列表，
+> 点评师就不会真跑。
 
 **6.3 `miniapps/agaistock/test/api.test.mjs`**：
 
