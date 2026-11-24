@@ -96,8 +96,11 @@ function sendJson(response, status, payload) {
   response.end(JSON.stringify(payload));
 }
 
-const REPO_ROOT = join(import.meta.dirname, '..', '..', '..', '..');
-const DEFAULT_DB = join(REPO_ROOT, 'data', 'agaistock.db');
+// 插件根：<plugin>/miniapp/node -> <plugin>/miniapp -> <plugin>
+// **不能**用「向上 4 级」：那只在插件位于仓库内时成立。安装后插件根在
+// ~/.minimax/plugins/<id>/，向上 4 级会落到插件目录之外，内核与配置全找不到。
+const PLUGIN_ROOT = join(import.meta.dirname, '..', '..');
+const KERNEL_SRC = join(PLUGIN_ROOT, 'src');
 const KERNEL_TIMEOUT_MS = 180000;
 
 /**
@@ -107,15 +110,22 @@ const KERNEL_TIMEOUT_MS = 180000;
  * 返回 {code, stdout, stderr}，不抛异常。
  * 带超时：三级别取数 + 点评可能跑很久，超时按失败处理，避免请求永久挂住。
  */
-export function runKernel(args) {
+export function runKernel(args, options = {}) {
+  const cwd = options.cwd || PLUGIN_ROOT;
+  const pythonPath = options.pythonPath || KERNEL_SRC;
+  const dbPath = options.dbPath || '';
   return new Promise((resolve) => {
-    const child = spawn('python', ['-m', 'agaistock.cli', ...args], {
-      cwd: REPO_ROOT,
-      env: {
-        ...process.env,
-        PYTHONPATH: join(REPO_ROOT, 'src'),
-        AGAISTOCK_DB: DEFAULT_DB,
-      },
+    const env = { ...process.env, PYTHONPATH: pythonPath };
+    if (dbPath) env.AGAISTOCK_DB = dbPath;
+    // **必须带 `-S`**：editable 安装（`pip install -e .`）注册的是 meta-path finder，
+    // 优先级**高于** PYTHONPATH —— 实测开发机上不加 `-S` 时 `import agaistock`
+    // 命中的是仓库里那份，不是插件自带的副本，自包含就成了空话。
+    // `-S` 同时禁用 site-packages，正好把「业务内核零第三方依赖」（Global Constraint 2）
+    // 从约定变成运行时硬约束：内核一旦依赖第三方包，Mini App 会立刻报错而不是
+    // 悄悄依赖用户机器上的环境。
+    const child = spawn('python', ['-S', '-m', 'agaistock.cli', ...args], {
+      cwd,
+      env,
     });
     let stdout = '';
     let stderr = '';
@@ -169,7 +179,7 @@ export async function handleRoute(request, response, options = {}) {
       message: '解析能力不可用。',
     }),
     kernel = runKernel,
-    dbPath = DEFAULT_DB,
+    dbPath = '',
   } = options;
 
   const url = new URL(request.url ?? '/', 'http://miniapp.local');
@@ -206,7 +216,7 @@ export async function handleRoute(request, response, options = {}) {
         tool: context.capabilities?.has?.('tool') ?? null,
         hostConnector: context.capabilities?.has?.('hostConnector') ?? null,
       },
-      observationCount: await countObservations(kernel, dbPath, readObservations),
+      observationCount: await countObservations(kernel, dbPath),
     });
     return;
   }
@@ -214,6 +224,16 @@ export async function handleRoute(request, response, options = {}) {
   if (request.method === 'GET' && url.pathname === '/api/observations') {
     // 观察库以内核为准（删除也走内核，行 id 必须是内核行 id）
     const result = await kernel(['list', '--db', dbPath, '--json']);
+    if (result.code !== 0) {
+      // 内核不可用 ≠ 没有观察记录。返回空列表会让用户以为「一条都没有」，
+      // 真实原因（Python 缺失 / 内核崩了 / 库打不开）被彻底吞掉。
+      sendJson(response, 500, {
+        ok: false,
+        error: 'KERNEL_FAILED',
+        message: (result.stderr || `exit=${result.code}`).slice(-500),
+      });
+      return;
+    }
     const payload = parseKernelJson(result.stdout);
     const items = Array.isArray(payload)
       ? payload
@@ -290,6 +310,14 @@ export async function handleRoute(request, response, options = {}) {
   if (request.method === 'GET' && url.pathname.endsWith('/reviews')) {
     const id = decodeURIComponent(url.pathname.slice('/api/observations/'.length, -'/reviews'.length));
     const result = await kernel(['reviews', id, '--db', dbPath, '--json']);
+    if (result.code !== 0) {
+      sendJson(response, 500, {
+        ok: false,
+        error: 'KERNEL_FAILED',
+        message: (result.stderr || `exit=${result.code}`).slice(-500),
+      });
+      return;
+    }
     const payload = parseKernelJson(result.stdout);
     sendJson(response, 200, payload ?? { observation_id: id, items: [] });
     return;
@@ -309,22 +337,21 @@ export async function handleRoute(request, response, options = {}) {
   sendJson(response, 404, { error: 'not_found' });
 }
 
-async function countObservations(kernel, dbPath, readObservations) {
-  try {
-    const result = await kernel(['list', '--db', dbPath, '--json']);
-    const payload = parseKernelJson(result.stdout);
-    if (payload && Array.isArray(payload.items)) return payload.items.length;
-  } catch {
-    // 内核不可用：回落到旧 JSON 文件观察库
-  }
-  return (await readObservations()).length;
+async function countObservations(kernel, dbPath) {
+  const result = await kernel(['list', '--db', dbPath, '--json']);
+  if (result.code !== 0) return null;
+  const payload = parseKernelJson(result.stdout);
+  if (payload && Array.isArray(payload.items)) return payload.items.length;
+  return null;
 }
 
 export async function start(context) {
   const dataDir = context.dataDir;
   await mkdir(dataDir, { recursive: true });
   const observationsPath = join(dataDir, OBSERVATIONS_FILE);
-  const clientEntry = await readFile(join(context.pluginRoot, 'miniapp/client/index.html'));
+  // 宿主给的 pluginRoot 才是权威；模块层级的推导只是兜底。
+  const pluginRoot = context.pluginRoot || PLUGIN_ROOT;
+  const clientEntry = await readFile(join(pluginRoot, 'miniapp/client/index.html'));
 
   // Task 15 把渲染逻辑拆到 render.mjs，页面用 <script type="module" src="./render.mjs"> 引入。
   // 宿主只把 index.html 交给 Node 进程（surface.path 是页面入口，不是静态文件服务器），
@@ -332,7 +359,7 @@ export async function start(context) {
   // 读不到文件时降级成空字符串 —— 让 start() 抛错会把整个 Mini App 拖到起不来。
   let renderModule = '';
   try {
-    renderModule = await readFile(join(context.pluginRoot, 'miniapp/client/render.mjs'), 'utf8');
+    renderModule = await readFile(join(pluginRoot, 'miniapp/client/render.mjs'), 'utf8');
   } catch {
     renderModule = '';
   }
@@ -398,6 +425,16 @@ export async function start(context) {
     }
   };
 
+  // 运行数据落宿主给的数据目录，**不是**插件目录 ——
+  // 插件目录是安装产物（可能被只读安装、也可能被 Host 重装覆盖），
+  // dataDir 才是运行时可写、跨重启保留的数据位置。
+  const dbPath = join(dataDir, 'agaistock.db');
+  const kernel = (args) => runKernel(args, {
+    cwd: pluginRoot,
+    pythonPath: join(pluginRoot, 'src'),
+    dbPath,
+  });
+
   const server = createServer((request, response) => {
     void handleRoute(request, response, {
       context,
@@ -406,8 +443,8 @@ export async function start(context) {
       readObservations,
       writeObservations,
       parseObservation,
-      kernel: runKernel,
-      dbPath: DEFAULT_DB,
+      kernel,
+      dbPath,
     }).catch(() => {
       if (!response.headersSent) sendJson(response, 500, { error: 'internal_error' });
     });

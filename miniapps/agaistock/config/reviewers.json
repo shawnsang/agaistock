@@ -1,0 +1,10 @@
+{
+  "reviewers": [
+    {
+      "id": "anchor-chanlun",
+      "enabled": true,
+      "module": "agaistock.skills.anchor_chanlun.reviewer",
+      "weight": 1.0
+    }
+  ]
+}

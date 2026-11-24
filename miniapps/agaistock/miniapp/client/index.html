@@ -349,7 +349,7 @@
           runtimeChip.textContent =
             (speech === true ? '语音可用' : speech === false ? '语音不可用' : '语音状态未知') + ' · ' +
             (agent === true ? 'Agent 可用' : agent === false ? 'Agent 不可用' : 'Agent 状态未知') +
-            ' · 已存 ' + (runtimeState.count || 0) + ' 条';
+            ' · ' + (runtimeState.count === null ? '观察库不可用' : '已存 ' + runtimeState.count + ' 条');
         }
 
         function refreshStatus() {
@@ -359,7 +359,7 @@
               var caps = data.capabilities || {};
               runtimeState.speech = caps.speechTranscribe === true;
               runtimeState.agent = data.agent === true;
-              runtimeState.count = data.observationCount || 0;
+              runtimeState.count = data.observationCount === null ? null : (data.observationCount || 0);
               renderChip();
               if (!runtimeState.speech) {
                 recordBtn.disabled = true;
@@ -636,6 +636,16 @@
           fetch('/api/observations', { headers: { accept: 'application/json' } })
             .then(function (r) { return r.json(); })
             .then(function (data) {
+              if (data && data.ok === false) {
+                // 内核不可用：必须显示原因，不能显示成「一条观察都没有」。
+                obsCount.textContent = '不可用';
+                runtimeState.count = null;
+                renderChip();
+                obsEmpty.classList.remove('hidden');
+                obsEmpty.textContent = '观察库不可用：' + (data.message || data.error || '未知原因');
+                obsTableWrap.classList.add('hidden');
+                return;
+              }
               var items = (data && data.items) || [];
               obsCount.textContent = items.length;
               runtimeState.count = items.length;

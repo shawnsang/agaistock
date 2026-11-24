@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{SYMBOL}} {{NAME}} · 缠论三级别分析报告</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8; color: #1d1d1f; margin: 0; padding: 24px 16px; line-height: 1.6; }
+  .container { max-width: 1280px; margin: 0 auto; }
+  header { background: #fff; padding: 24px 28px; border-radius: 16px;
+    border: 0.5px solid rgba(0,0,0,0.08); margin-bottom: 16px; }
+  header h1 { font-size: 22px; font-weight: 500; margin: 0 0 6px 0; }
+  header .meta { color: #6e6e73; font-size: 13px; margin: 0; }
+  header .rule { margin-top: 12px; padding-top: 12px; border-top: 0.5px solid rgba(0,0,0,0.08);
+    font-size: 12px; color: #6e6e73; display: flex; gap: 22px; flex-wrap: wrap; }
+  header .rule b { color: #1d1d1f; font-weight: 500; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); margin-bottom: 16px; }
+  .grid.lv3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .card { background: #fff; padding: 18px 20px; border-radius: 12px;
+    border: 0.5px solid rgba(0,0,0,0.08); }
+  .card .label { color: #6e6e73; font-size: 12px; margin-bottom: 4px; }
+  .card .value { font-size: 21px; font-weight: 500; }
+  .card .sub { font-size: 12px; color: #6e6e73; margin-top: 5px; line-height: 1.5; }
+  .card.lv { border-left: 3px solid #d3d1c7; }
+  .card.lv.week { border-left-color: #534ab7; }
+  .card.lv.day { border-left-color: #185fa5; }
+  .card.lv.m30 { border-left-color: #0f6e56; }
+  .card.res { background: #fbfbf8; }
+  .card.res .value { font-size: 19px; }
+  .card.up .value { color: #d63333; }
+  .card.down .value { color: #2a7f3f; }
+  .card.amber .value { color: #b66b16; }
+  .card.gray .value { color: #5f5e5a; }
+  section { background: #fff; border-radius: 16px; padding: 22px 26px;
+    border: 0.5px solid rgba(0,0,0,0.08); margin-bottom: 16px; }
+  section h2 { font-size: 16px; font-weight: 500; margin: 0 0 14px 0; }
+  section h3 { font-size: 13px; font-weight: 500; margin: 18px 0 8px 0; color: #5f5e5a; }
+  section p { font-size: 13px; color: #1d1d1f; margin: 6px 0; }
+  .muted { color: #6e6e73; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid rgba(0,0,0,0.06); vertical-align: top; }
+  th { color: #6e6e73; font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; white-space: nowrap; }
+  .tag.up { background: #fadcd6; color: #993c1d; }
+  .tag.down { background: #cee2d5; color: #27500a; }
+  .tag.amber { background: #faecc6; color: #854f0b; }
+  .tag.blue { background: #d3e3f4; color: #185fa5; }
+  .tag.purple { background: #e5e2f7; color: #3c3489; }
+  .tag.gray { background: #eeede7; color: #5f5e5a; }
+  .key-price { padding: 12px 16px; border-radius: 10px; margin: 8px 0; font-family: ui-monospace, monospace;
+    border-left: 3px solid; background: #fafaf6; }
+  .key-price.week { border-color: #534ab7; }
+  .key-price.day { border-color: #185fa5; }
+  .key-price.m30 { border-color: #0f6e56; }
+  .key-price .name { font-size: 13px; font-weight: 500; color: #1d1d1f; font-family: -apple-system, sans-serif; }
+  .key-price .desc { font-size: 12px; color: #6e6e73; margin-top: 2px; font-family: -apple-system, sans-serif; }
+  .strategy { background: #fafaf6; border-left: 3px solid #534ab7; padding: 14px 18px;
+    border-radius: 6px; margin: 10px 0; font-size: 13px; }
+  .strategy strong { color: #534ab7; font-weight: 500; }
+  .chart-wrap { width: 100%; height: 340px; }
+  .chart-block { margin-bottom: 8px; }
+  .chart-title { font-size: 13px; font-weight: 500; margin: 14px 0 6px 0; }
+  .chart-title span { font-weight: 400; color: #6e6e73; font-size: 12px; margin-left: 8px; }
+  .chain { display: flex; align-items: stretch; gap: 10px; flex-wrap: wrap; }
+  .chain .node { flex: 1; min-width: 160px; background: #fafaf6; border-radius: 10px;
+    padding: 12px 14px; border: 0.5px solid rgba(0,0,0,0.08); }
+  .chain .node .t { font-size: 12px; color: #6e6e73; }
+  .chain .node .v { font-size: 14px; font-weight: 500; margin-top: 3px; }
+  .chain .arrow { display: flex; align-items: center; color: #b4b2a9; font-size: 16px; }
+  .disclaimer { font-size: 12px; color: #6e6e73; padding: 14px 18px; border-radius: 8px;
+    background: #fafaf6; border: 0.5px dashed rgba(0,0,0,0.15); margin-top: 12px; }
+  ul.tight { padding-left: 20px; margin: 6px 0; }
+  ul.tight li { margin: 4px 0; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>{{SYMBOL}} {{NAME}} · 缠论三级别分析报告</h1>
+  <p class="meta">数据截至 {{DATA_UNTIL}} · 周线 {{WEEK_RANGE}} · 日线 {{DAY_RANGE}} · 30 分钟 {{M30_RANGE}} · 仅供技术分析参考，不构成投资建议</p>
+  <div class="rule">
+    <span><b>周线</b> 长期战略 · 定方向</span>
+    <span><b>日线</b> 中期战术 · 看位置</span>
+    <span><b>30 分钟</b> 短期执行 · 选进出</span>
+    <span><b>小级别服从大级别</b> 30 分钟只做确认</span>
+  </div>
+</header>
+
+<div class="grid lv3">
+  <div class="card lv week {{WEEK_CARD_CLASS}}">
+    <div class="label">周线 · 长期战略（定方向）</div>
+    <div class="value">{{WEEK_BIAS_ZH}}</div>
+    <div class="sub">{{WEEK_SUMMARY}}</div>
+  </div>
+  <div class="card lv day {{DAY_CARD_CLASS}}">
+    <div class="label">日线 · 中期战术（看位置）</div>
+    <div class="value">{{DAY_BIAS_ZH}}</div>
+    <div class="sub">{{DAY_SUMMARY}}</div>
+  </div>
+  <div class="card lv m30 {{M30_CARD_CLASS}}">
+    <div class="label">30 分钟 · 短期执行（选进出）</div>
+    <div class="value">{{M30_BIAS_ZH}}</div>
+    <div class="sub">{{M30_SUMMARY}}</div>
+  </div>
+  <div class="card res {{RES_CARD_CLASS}}">
+    <div class="label">三级别共振结论</div>
+    <div class="value">{{RES_LEVEL}}</div>
+    <div class="sub">等级 {{RES_GRADE}} · {{RES_TONE}}</div>
+  </div>
+</div>
+
+<section>
+  <h2>1. 统合结论</h2>
+  <p><strong>{{NARRATIVE}}</strong></p>
+  <h3>共振判定</h3>
+  <p>{{RES_DETAIL}}</p>
+  <h3>操作定性</h3>
+  <div class="strategy"><strong>{{RES_TONE}}</strong> —— {{ACTION_SUMMARY}}</div>
+  <h3>触发与失效条件</h3>
+  <ul class="tight">
+    {{INVALIDATION_ITEMS}}
+  </ul>
+</section>
+
+<section>
+  <h2>2. 三级别 K 线结构图</h2>
+  <p class="muted">橙色虚线框为该级别的最近中枢，圆点为背驰与关键极值点；涨红跌绿。某级别 K 线根数超过 600 根时图面会被压扁，此时该图只作走势轮廓参考，结构判断以第 3 节明细表、第 5 节价位与第 7 节窗口体检为准。</p>
+  <div class="chart-block">
+    <div class="chart-title">周线 · 长期结构<span>{{WEEK_CHART_SUB}}</span></div>
+    <div class="chart-wrap"><canvas id="chart-week"></canvas></div>
+  </div>
+  <div class="chart-block">
+    <div class="chart-title">日线 · 中期结构<span>{{DAY_CHART_SUB}}</span></div>
+    <div class="chart-wrap"><canvas id="chart-day"></canvas></div>
+  </div>
+  <div class="chart-block">
+    <div class="chart-title">30 分钟 · 短期结构<span>{{M30_CHART_SUB}}</span></div>
+    <div class="chart-wrap"><canvas id="chart-m30"></canvas></div>
+  </div>
+</section>
+
+<section>
+  <h2>3. 三级别结构明细</h2>
+  <table>
+    <thead><tr><th>级别</th><th>角色</th><th>当前强弱</th><th>走势类型</th><th>买卖点</th><th>最近中枢（ZD ~ ZG）</th><th>最近背驰</th></tr></thead>
+    <tbody>
+      {{LEVEL_ROWS}}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>4. 区间套确认链</h2>
+  <p class="muted">缠论的核心联动工具：大级别出现背驰后，到次级别寻找同向背驰，层层收敛定位转折。此处只用「确认 / 未确认」判断，不跨级别比较 MACD 数值。锚点落在次级别数据窗口之外的，判为「越界」而非「未确认」。</p>
+  <h3>周线 → 日线</h3>
+  <div class="chain">
+    <div class="node">
+      <div class="t">周线信号</div>
+      <div class="v">{{NEST_WD_UPPER}}</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="node">
+      <div class="t">日线确认</div>
+      <div class="v">{{NEST_WD_SUB}}</div>
+    </div>
+    <div class="arrow">=</div>
+    <div class="node">
+      <div class="t">结论</div>
+      <div class="v">{{NEST_WD_VERDICT}}</div>
+    </div>
+  </div>
+  <p style="margin-top:12px">{{NEST_WD_TEXT}}</p>
+
+  <h3>日线 → 30 分钟</h3>
+  <div class="chain">
+    <div class="node">
+      <div class="t">日线信号</div>
+      <div class="v">{{NEST_DAY}}</div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="node">
+      <div class="t">30 分钟确认</div>
+      <div class="v">{{NEST_M30}}</div>
+    </div>
+    <div class="arrow">=</div>
+    <div class="node">
+      <div class="t">结论</div>
+      <div class="v">{{NEST_VERDICT}}</div>
+    </div>
+  </div>
+  <p style="margin-top:12px">{{NEST_TEXT}}</p>
+</section>
+
+<section>
+  <h2>5. 三级别关键价位</h2>
+  {{KEY_LEVEL_BLOCKS}}
+  <h3>供给带 / 支撑带（最近中枢之外的历史中枢）</h3>
+  <p class="muted">缠论里中枢的价值不在「新旧」，而在「是否与当前走势发生重叠」。以下列出与现价发生重叠（距离 10% 以内）、以及最近的上方供给带与下方支撑带。这些带是不该被「只标注最近中枢」淹没的关键阻力与支撑。</p>
+  {{BAND_BLOCKS}}
+</section>
+
+<section>
+  <h2>6. 条件式操作建议</h2>
+  {{STRATEGY_BLOCKS}}
+</section>
+
+<section>
+  <h2>7. 窗口与结构密度</h2>
+  <p class="muted">{{WINDOW_PRINCIPLE}}</p>
+  <table>
+    <thead><tr><th>级别</th><th>角色</th><th>数据区间</th><th>K 线根数</th><th>中枢数</th><th>背驰有效期</th><th>窗口体检</th></tr></thead>
+    <tbody>
+      {{WINDOW_ROWS}}
+    </tbody>
+  </table>
+  <h3>三级别共同覆盖区间</h3>
+  <p>{{WINDOW_COMMON}}</p>
+  <h3>结构密度均衡度</h3>
+  <p>{{WINDOW_DENSITY}}</p>
+  <p class="muted">{{WINDOW_RULE}}</p>
+</section>
+
+<section>
+  <h2>8. 风险与注意事项</h2>
+  <ul class="tight">
+    {{CAVEAT_ITEMS}}
+  </ul>
+  <p class="muted">以上分析仅基于历史 K 线结构 + MACD 量化，不考虑突发基本面变化（政策、订单、汇率、监管等）。</p>
+</section>
+
+<div class="disclaimer">
+  <strong>免责声明</strong>：以上内容基于公开数据和量化技术分析，仅供参考，不构成投资建议。
+  市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，
+  必要时咨询持牌专业机构。过往表现不预示未来收益。
+</div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+/* ===== 数据区：由 inline_multi_data.py 生成，请勿手工编辑 ===== */
+const MULTI = {"symbol":"","name":"","levels":{}};
+
+function maSeries(arr, n) {
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    if (i < n - 1) { out.push(null); continue; }
+    let s = 0;
+    for (let j = i - n + 1; j <= i; j++) s += arr[j];
+    out.push(+(s / n).toFixed(2));
+  }
+  return out;
+}
+
+function renderLevel(key, canvasId) {
+  const L = MULTI.levels[key];
+  if (!L || !L.kline || !L.kline.length) return;
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+
+  const dates = L.kline.map(k => k.d);
+  const ohlc = L.kline.map(k => ({ o: k.o, c: k.c, h: k.h, l: k.l }));
+  const idxMap = {};
+  dates.forEach((d, i) => { idxMap[d] = i; });
+  const ma = L.ma || 20;
+  const pivots = L.pivots || [];
+  const marks = L.marks || [];
+
+  const plugin = {
+    id: 'overlay-' + key,
+    afterDatasetsDraw(chart) {
+      const ctx = chart.ctx, sx = chart.scales.x, sy = chart.scales.y;
+      const left = sx.left, right = sx.right;
+      ctx.save();
+
+      pivots.forEach(p => {
+        const i1 = idxMap[p.from], i2 = idxMap[p.to];
+        if (i1 === undefined || i2 === undefined) return;
+        let x1 = sx.getPixelForValue(i1) - 3;
+        let x2 = sx.getPixelForValue(i2) + 3;
+        if (x2 < left || x1 > right) return;
+        x1 = Math.max(x1, left); x2 = Math.min(x2, right);
+        const yT = sy.getPixelForValue(p.ZG);
+        const yB = sy.getPixelForValue(p.ZD);
+        ctx.fillStyle = 'rgba(182,107,22,0.10)';
+        ctx.strokeStyle = '#b66b16';
+        ctx.setLineDash([4, 3]);
+        ctx.lineWidth = 1;
+        ctx.fillRect(x1, yT, x2 - x1, yB - yT);
+        ctx.strokeRect(x1, yT, x2 - x1, yB - yT);
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#b66b16';
+        ctx.font = '11px -apple-system, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('中枢 ' + p.ZD + ' ~ ' + p.ZG, x1 + 4, yT - 5);
+      });
+
+      marks.forEach(m => {
+        const i = idxMap[m.d];
+        if (i === undefined) return;
+        const px = sx.getPixelForValue(i);
+        if (px < left || px > right) return;
+        const py = sy.getPixelForValue(m.p);
+        ctx.beginPath();
+        ctx.arc(px, py, 4.5, 0, 2 * Math.PI);
+        ctx.fillStyle = m.c;
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        if (m.l) {
+          ctx.fillStyle = m.c;
+          ctx.font = '11px -apple-system, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(m.l, px, py - 10);
+        }
+      });
+      ctx.restore();
+    }
+  };
+
+  const maxTicks = dates.length > 600 ? 10 : (dates.length > 200 ? 12 : 14);
+
+  new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: dates,
+      datasets: [
+        {
+          label: key + ' K',
+          data: ohlc.map(b => [b.o, b.h, b.l, b.c]),
+          backgroundColor: ohlc.map(b => b.c >= b.o ? '#d63333' : '#2a7f3f'),
+          borderColor: ohlc.map(b => b.c >= b.o ? '#a32d2d' : '#1e5c2c'),
+          borderWidth: 0.5,
+          barPercentage: 0.75,
+          categoryPercentage: 0.95
+        },
+        {
+          label: ma + '周期均线',
+          data: maSeries(ohlc.map(o => o.c), ma),
+          type: 'line',
+          borderColor: '#185fa5',
+          borderWidth: 1.2,
+          pointRadius: 0,
+          fill: false
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              if (ctx.datasetIndex === 0) {
+                const o = ohlc[ctx.dataIndex];
+                return '开' + o.o + ' 高' + o.h + ' 低' + o.l + ' 收' + o.c;
+              }
+              return 'MA' + ma + ' ' + ctx.formattedValue;
+            }
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { autoSkip: true, maxTicksLimit: maxTicks, font: { size: 11 } }, grid: { display: false } },
+        y: { ticks: { font: { size: 11 } }, grid: { color: 'rgba(0,0,0,0.06)' } }
+      }
+    },
+    plugins: [plugin]
+  });
+}
+
+renderLevel('week', 'chart-week');
+renderLevel('day', 'chart-day');
+renderLevel('m30', 'chart-m30');
+</script>
+</body>
+</html>

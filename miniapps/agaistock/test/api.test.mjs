@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { handleRoute } from '../miniapp/node/server.mjs';
@@ -205,4 +207,40 @@ test('POST /api/save writes through the injected observation store', async () =>
   assert.equal(response.statusCode, 200);
   assert.equal(written.length, 1);
   assert.equal(written[0][0].draft.symbol, '002378');
+});
+
+test('GET /api/observations returns 500 when the kernel fails', async () => {
+  const response = new FakeResponse();
+  const kernel = async () => ({ code: 1, stdout: '', stderr: 'ModuleNotFoundError: agaistock' });
+  await handleRoute(
+    makeRequest('GET', '/api/observations'),
+    response,
+    { kernel, dbPath: 'test.db' },
+  );
+  // 内核不可用不能伪装成「一条观察都没有」
+  assert.equal(response.statusCode, 500);
+  assert.equal(response.json().ok, false);
+  assert.match(response.json().message, /ModuleNotFoundError/);
+});
+
+test('GET /api/observations/:id/reviews returns 500 when the kernel fails', async () => {
+  const response = new FakeResponse();
+  const kernel = async () => ({ code: 1, stdout: '', stderr: '内核炸了' });
+  await handleRoute(
+    makeRequest('GET', '/api/observations/obs_1/reviews'),
+    response,
+    { kernel, dbPath: 'test.db' },
+  );
+  assert.equal(response.statusCode, 500);
+  assert.equal(response.json().ok, false);
+});
+
+test('runKernel resolves the kernel from the plugin bundle, not the repo', () => {
+  // 插件根 = <plugin>/miniapp/node 向上两级；内核必须在插件自带的 src 里。
+  const source = readFileSync(
+    join(import.meta.dirname, '..', 'miniapp', 'node', 'server.mjs'),
+    'utf8',
+  );
+  assert.match(source, /const PLUGIN_ROOT = join\(import\.meta\.dirname, '\.\.', '\.\.'\)/);
+  assert.match(source, /const KERNEL_SRC = join\(PLUGIN_ROOT, 'src'\)/);
 });
