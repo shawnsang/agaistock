@@ -183,6 +183,10 @@ D:\workroom\agaistock\
 > **「没有运行数据目录」说的是数据，不是字节码**：包内运行时仍会累积 `__pycache__`
 > 字节码（无害：只读安装时 CPython 容忍 `.pyc` 写失败，终审实测内核仍 exit 0
 > 且输出 JSON 有效）。
+>
+> ⚠️ 括号里「只读安装时 CPython 容忍 `.pyc` 写失败」这条**尚未独立复现**：
+> Windows 的只读**属性**不阻断写入，要验只能在 POSIX 的只读安装上做。
+> 本仓库的 Windows 环境**验不了**这条，所以它现在只是历史结论，不是已验证事实。
 
 **与初稿的三处偏离（以实现为准）**：
 
@@ -753,4 +757,4 @@ ReviewVerdict
 - `src/agaistock/mcp/` 的 MCP 工具暴露
 - 上游 `resonance` / `window_alignment` / `key_levels` 未接入（设计级，下一轮）
 - `AGAISTOCK_DATA_DIR` 若给的是**相对路径**，会按内核 cwd 解析（安装副本里 cwd 就是包根）→ 将来要加绝对路径守卫；宿主目前总是给绝对路径，暂不可达。
-- 回落值 `repo_root()/"data"` 在**安装副本里指向包内** —— 环境变量是唯一的护栏，宿主侧一旦回归，缺陷会静默复活。（`buildKernelOptions` 把映射收到一处 + 源码断言，只能挡住本仓库内的改动，挡不住宿主回归。）
+- 回落值 `repo_root()/"data"` 在**安装副本里指向包内** —— 环境变量是唯一的护栏，宿主侧一旦回归，缺陷会静默复活。（`buildKernelEnv(context, pluginRoot)` 直接吃宿主 context 算出内核运行路径，中间没有任何可被覆写的对象；三层**行为**护栏锁住它 —— env 纯函数 / 真实 spawn 路径 / `start()` 注入点 —— 能挡住本仓库内的改动，但**挡不住宿主侧回归**。）

@@ -8140,11 +8140,15 @@ work_dir.mkdir(parents=True, exist_ok=True)
 两条后果：
 
 1. **污染安装产物**：上游脚本产出的 K 线与结构 JSON 落进插件包目录
-   （安装副本的 `package/data/chanlun/002378/` 下有 9 个文件；来源见下面的注）。
+   （安装副本的 `package/data/chanlun/002378/` 下有 8 个文件；来源见下面的注）。
    `data/` 已被 `.gitignore` 忽略，所以这些文件**不随包发布**，但每次运行都会在
    安装目录里重新生成一批。
-   > **来源说明**：宿主**会把 gitignored 产物一并拷进安装副本**（安装副本里 `.pyc` 的
-   > mtime 与仓库里的一致），所以那 9 个文件**分不清是运行时写的还是宿主拷的**。
+   > **来源说明**：这 8 个文件是**运行时写的**，不是宿主拷进去的 —— 可复现的证据是
+   > **时序**：安装副本解包于 `2026-11-24T21:59:05Z`，而
+   > `package/src/agaistock/providers/__pycache__/mcode_cli.cpython-311.pyc`
+   > 的 mtime 是 `2026-11-24T22:00:32Z` —— **晚于解包 87 秒** ⇒ 确证是运行时写的。
+   > （安装副本里共 24 个 `.pyc`，与仓库里 mtime 相同的 **0** 个 ——
+   > **不要**再声称「宿主把 gitignored 产物拷进安装副本」，那句话不成立。）
    > 缺陷本身由**代码 + 只读安装复现**证明（不复现时 `work_dir.mkdir` 抛
    > `PermissionError`），不靠文件计数。
 2. **只读安装会直接崩**：`work_dir.mkdir(parents=True, exist_ok=True)` 在只读目录上抛
@@ -8380,13 +8384,19 @@ miniapp { action: "open",    pluginId: "agaistock" }
 
 ### Task 20 · fix round 1 — 补上 `start()` 接线的回归护栏 + 让内核 env 不受宿主环境影响
 
+> ⚠️ **本小节已被 fix round 2 取代**：`buildKernelOptions` 与那条源码断言
+> （「start() wires the kernel through buildKernelOptions」）**都删了** ——
+> 它们只锚在「调用点字面量存在」，验证不了数据流。护栏改成**行为断言**，
+> 见下面 `### Task 20 · fix round 2` 小节。**别照着本小节的写法实现。**
+
 > **来源**：Task 20 的独立终审（verifier）—— **0 Critical / 0 Important，2 Minor + 4 Nit**。
 > 控制器已**独立复现**两个 Minor（不是采信评审自报）。
 
 **Minor 1（必须修）：`context.dataDir → runKernel → AGAISTOCK_DATA_DIR` 这段接线没有任何测试护栏。**
 
 终审做了 8 组变异，把 `start()` 里的 `dataDir` 去掉、或改成传 `pluginRoot`，**两套测试都仍然全绿**。
-控制器独立复现（`.tmp/task20-fix/check_m6_m7.py`）：
+控制器独立复现（`.tmp/task20-fix/check_m6_m7.py` —— **仅本地脚本，被 `.gitignore`
+忽略，不在仓库里**，后来人无法直接复跑，只能照下面的描述重建）：
 
 ```
 M6: start() 不再传 dataDir          *** 漏过（测试仍全绿）***  ℹ tests 54 | ℹ pass 54 | ℹ fail 0
@@ -8586,7 +8596,8 @@ $env:AGAISTOCK_DATA_DIR='D:\ambient\host\data'; node --test "miniapps/agaistock/
 
 预期：**57/57 全绿**（修之前这里是 52/54、fail 2；加了 3 条新测试后总数从 54 变成 57）。
 
-**并重跑变异检查**（`.tmp/task20-fix/check_m6_m7.py`，控制器已把变异更新成下面三种「真实回归」形态）：
+**并重跑变异检查**（`.tmp/task20-fix/check_m6_m7.py` —— **仅本地脚本，被 `.gitignore`
+忽略，不在仓库里**；控制器已把变异更新成下面三种「真实回归」形态）：
 
 | 变异 | 期望被哪条测试抓住 |
 |---|---|

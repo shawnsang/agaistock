@@ -100,46 +100,44 @@ function sendJson(response, status, payload) {
 // **不能**用「向上 4 级」：那只在插件位于仓库内时成立。安装后插件根在
 // ~/.minimax/plugins/<id>/，向上 4 级会落到插件目录之外，内核与配置全找不到。
 const PLUGIN_ROOT = join(import.meta.dirname, '..', '..');
+// 内核源码目录（插件自带的那份）。PYTHONPATH 现在按 pluginRoot 现算
+// （`join(pluginRoot, 'src')`），但这条推导本身要留一个字面量在案 ——
+// 它守的是「插件根怎么算」，不是「路径怎么映射」。
 const KERNEL_SRC = join(PLUGIN_ROOT, 'src');
 const KERNEL_TIMEOUT_MS = 180000;
 
 /**
- * 内核子进程的启动参数。
+ * 内核数据库路径 —— **一处**说了算。
  *
- * **由这里独占 `context.dataDir → {dbPath, dataDir}` 的映射** —— 数据库与
- * 缠论分析工作目录都必须落宿主给的数据目录，不能落插件目录（安装产物，
- * 可能被重装覆盖，也可能只读安装）。一处说了算，别在别处再拼一遍。
+ * 数据库与缠论分析工作目录都必须落宿主给的数据目录（`context.dataDir`），
+ * 不能落插件目录（安装产物，可能被重装覆盖，也可能只读安装）。
  */
-export function buildKernelOptions(context, pluginRoot) {
-  const dataDir = context.dataDir;
-  return {
-    cwd: pluginRoot,
-    pythonPath: join(pluginRoot, 'src'),
-    dbPath: join(dataDir, 'agaistock.db'),
-    dataDir,
-  };
+export function kernelDbPath(context = {}) {
+  return context.dataDir ? join(context.dataDir, 'agaistock.db') : '';
 }
 
 /**
- * 组装内核子进程的环境变量。
+ * 内核子进程的环境变量 —— **唯一一处决定内核运行路径的地方**。
  *
- * 运行期的两样东西都必须落宿主给的数据目录（`context.dataDir`）：
- *  - 数据库：AGAISTOCK_DB
- *  - 缠论分析工作目录：AGAISTOCK_DATA_DIR
- * 插件目录是**安装产物**（可能被重装覆盖，也可能只读安装），运行产物不能写在那里。
+ * 直接吃宿主的 context：调用方**拿不到**中间对象，也就无法在传给内核之前
+ * 把路径改成别的（上一轮正是栽在这里：源码断言只看得到「调用点字面量」，
+ * 看不到数据流）。
+ *
+ * 内核的运行路径**只由宿主的 context 决定**：宿主环境里残留的同名变量一律
+ * 先清掉，否则宿主一个旧路径就能把内核写到别处。
  */
-export function buildKernelEnv(options = {}) {
+export function buildKernelEnv(context = {}, pluginRoot = PLUGIN_ROOT) {
   const env = {
     ...process.env,
-    PYTHONPATH: options.pythonPath || KERNEL_SRC,
+    PYTHONPATH: join(pluginRoot, 'src'),
     PYTHONIOENCODING: 'utf-8',
   };
-  // 内核的运行路径**只由宿主显式给的 option 决定**。不能让宿主环境里残留的
-  // 同名变量继承进内核 —— 否则宿主里一个旧路径就能把内核写到别处。
   delete env.AGAISTOCK_DB;
   delete env.AGAISTOCK_DATA_DIR;
-  if (options.dbPath) env.AGAISTOCK_DB = options.dbPath;
-  if (options.dataDir) env.AGAISTOCK_DATA_DIR = options.dataDir;
+  if (context.dataDir) {
+    env.AGAISTOCK_DB = kernelDbPath(context);
+    env.AGAISTOCK_DATA_DIR = context.dataDir;
+  }
   return env;
 }
 
@@ -149,21 +147,23 @@ export function buildKernelEnv(options = {}) {
  * Node 侧不碰 sqlite —— 数据库的唯一入口是内核（主规格 D3：接入层是唯一接口）。
  * 返回 {code, stdout, stderr}，不抛异常。
  * 带超时：三级别取数 + 点评可能跑很久，超时按失败处理，避免请求永久挂住。
+ *
+ * env 在**最后一次**从宿主给的 context 现算，中间没有任何可被覆写的对象 ——
+ * 上一轮正是栽在一个中间 options 对象上（源码断言只看得到「调用点字面量」，
+ * 看不到数据流，评审方用 M8/M9/M14/M15/M16/C4 六组变异复现过）。
+ * `spawnFn` 是注入点：测试要能观测子进程**真的**收到了什么 env。
  */
-export function runKernel(args, options = {}) {
-  const cwd = options.cwd || PLUGIN_ROOT;
-  const pythonPath = options.pythonPath || KERNEL_SRC;
-  const dbPath = options.dbPath || '';
-  const dataDir = options.dataDir || '';
+export function runKernel(args, context = {}, pluginRoot = PLUGIN_ROOT, spawnFn = spawn) {
+  const cwd = pluginRoot;
   return new Promise((resolve) => {
-    const env = buildKernelEnv({ pythonPath, dbPath, dataDir });
+    const env = buildKernelEnv(context, pluginRoot);
     // **必须带 `-S`**：editable 安装（`pip install -e .`）注册的是 meta-path finder，
     // 优先级**高于** PYTHONPATH —— 实测开发机上不加 `-S` 时 `import agaistock`
     // 命中的是仓库里那份，不是插件自带的副本，自包含就成了空话。
     // `-S` 同时禁用 site-packages，正好把「业务内核零第三方依赖」（Global Constraint 2）
     // 从约定变成运行时硬约束：内核一旦依赖第三方包，Mini App 会立刻报错而不是
     // 悄悄依赖用户机器上的环境。
-    const child = spawn('python', ['-S', '-m', 'agaistock.cli', ...args], {
+    const child = spawnFn('python', ['-S', '-m', 'agaistock.cli', ...args], {
       cwd,
       env,
       encoding: 'utf8',
@@ -219,10 +219,13 @@ export async function handleRoute(request, response, options = {}) {
       error: 'UNAVAILABLE',
       message: '解析能力不可用。',
     }),
-    kernel = runKernel,
+    kernel: injectedKernel,
     dbPath = '',
     dataDir = '',
   } = options;
+
+  // 默认内核也走 context 驱动：只有宿主给了 dataDir 才带上运行路径。
+  const kernel = injectedKernel || ((args) => runKernel(args, { dataDir }));
 
   // 结构化观察草稿的落地目录：优先用宿主给的数据目录，退回数据库所在目录。
   const draftDir = dataDir || dirname(dbPath);
@@ -410,7 +413,7 @@ async function countObservations(kernel, dbPath) {
   return null;
 }
 
-export async function start(context) {
+export async function start(context, deps = {}) {
   const dataDir = context.dataDir;
   await mkdir(dataDir, { recursive: true });
   const observationsPath = join(dataDir, OBSERVATIONS_FILE);
@@ -493,10 +496,15 @@ export async function start(context) {
   // 运行数据落宿主给的数据目录，**不是**插件目录 ——
   // 插件目录是安装产物（可能被只读安装、也可能被 Host 重装覆盖），
   // dataDir 才是运行时可写、跨重启保留的数据位置。
-  // 映射由 buildKernelOptions 一处说了算，别在这里再拼一遍。
-  const kernelOptions = buildKernelOptions(context, pluginRoot);
-  const dbPath = kernelOptions.dbPath;
-  const kernel = (args) => runKernel(args, kernelOptions);
+  // 数据库路径由 kernelDbPath 一处说了算（不再有可被覆写的中间对象）。
+  const dbPath = kernelDbPath(context);
+
+  // 内核工厂可注入：测试要能观测 start() 到底把什么递给了内核。
+  // 默认实现把**宿主的 context 原样**传给 runKernel —— 中间不再有任何
+  // 可被改写路径的对象，上一轮的缺陷（M8/M9/M14/M15/M16）因此无处可藏。
+  const createKernel = deps.createKernel
+    || ((ctx, root) => (args) => runKernel(args, ctx, root));
+  const kernel = createKernel(context, pluginRoot, dbPath);
 
   const server = createServer((request, response) => {
     void handleRoute(request, response, {
@@ -538,7 +546,7 @@ export async function start(context) {
   context.signal.addEventListener('abort', onAbort, { once: true });
   if (context.signal.aborted) await dispose();
 
-  return { dispose };
+  return { dispose, port: server.address()?.port };
 }
 
 /** Coerce the model output into the fixed observation-card shape. */

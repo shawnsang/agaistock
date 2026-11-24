@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { handleRoute, buildKernelEnv, buildKernelOptions } from '../miniapp/node/server.mjs';
+import { handleRoute, buildKernelEnv, kernelDbPath, runKernel, start } from '../miniapp/node/server.mjs';
 
 function makeRequest(method, url, body) {
   return {
@@ -275,55 +275,112 @@ test('paths outside the whitelist still return 404', async () => {
 });
 
 test('the kernel gets the host data dir, not the installed package dir', () => {
-  const env = buildKernelEnv({ dbPath: 'D:\\host\\data\\agaistock.db', dataDir: 'D:\\host\\data' });
-  assert.equal(env.AGAISTOCK_DB, 'D:\\host\\data\\agaistock.db');
+  const env = buildKernelEnv({ dataDir: 'D:\\host\\data' }, 'D:\\pkg');
   assert.equal(env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
+  assert.equal(env.AGAISTOCK_DB, 'D:\\host\\data\\agaistock.db');
 });
 
 test('the kernel env never invents a data dir on its own', () => {
-  const env = buildKernelEnv({});
+  const env = buildKernelEnv({}, 'D:\\pkg');
   assert.equal(env.AGAISTOCK_DATA_DIR, undefined);
 });
 
 test('a blank data dir is not a usable path', () => {
-  const env = buildKernelEnv({ dataDir: '' });
+  const env = buildKernelEnv({ dataDir: '' }, 'D:\\pkg');
   assert.equal(env.AGAISTOCK_DATA_DIR, undefined);
 });
 
-test('the kernel options carry the host data dir, not the plugin dir', () => {
-  const context = { dataDir: 'D:\\host\\data', pluginRoot: 'D:\\pkg' };
-  const opts = buildKernelOptions(context, 'D:\\pkg');
-  assert.equal(opts.dataDir, 'D:\\host\\data');
-  assert.equal(opts.dbPath, join('D:\\host\\data', 'agaistock.db'));
-  assert.notEqual(opts.dataDir, 'D:\\pkg');
-});
-
-test('the kernel env is decided by the options, not by the host environment', () => {
+test('the kernel env is decided by the host context, not by the host environment', () => {
   // 宿主环境里残留同名变量时，内核也**不能**继承它 —— 否则宿主一个旧路径
   // 就能把内核写到别处（曾经让本文件两条断言在 ambient env 下 fail 2）。
+  // ⚠️ finally 必须**保存 → 还原**，不能直接 delete —— delete 会抹掉运行者
+  // 本来就有的 ambient 值（fix round 1 的 Nit 3）。
+  const previousDir = process.env.AGAISTOCK_DATA_DIR;
+  const previousDb = process.env.AGAISTOCK_DB;
   process.env.AGAISTOCK_DATA_DIR = 'D:\\ambient\\host\\data';
   process.env.AGAISTOCK_DB = 'D:\\ambient\\host\\data\\agaistock.db';
   try {
-    const bare = buildKernelEnv({});
+    const bare = buildKernelEnv({}, 'D:\\pkg');
     assert.equal(bare.AGAISTOCK_DATA_DIR, undefined);
     assert.equal(bare.AGAISTOCK_DB, undefined);
-    const explicit = buildKernelEnv({ dbPath: 'D:\\x\\a.db', dataDir: 'D:\\x' });
+    const explicit = buildKernelEnv({ dataDir: 'D:\\x' }, 'D:\\pkg');
     assert.equal(explicit.AGAISTOCK_DATA_DIR, 'D:\\x');
-    assert.equal(explicit.AGAISTOCK_DB, 'D:\\x\\a.db');
+    assert.equal(explicit.AGAISTOCK_DB, join('D:\\x', 'agaistock.db'));
   } finally {
-    delete process.env.AGAISTOCK_DATA_DIR;
-    delete process.env.AGAISTOCK_DB;
+    if (previousDir === undefined) delete process.env.AGAISTOCK_DATA_DIR;
+    else process.env.AGAISTOCK_DATA_DIR = previousDir;
+    if (previousDb === undefined) delete process.env.AGAISTOCK_DB;
+    else process.env.AGAISTOCK_DB = previousDb;
   }
 });
 
-test('start() wires the kernel through buildKernelOptions', () => {
-  // 堵住「绕过 helper 直接手写 options」这条路。
-  // ⚠️ 断言必须锚在**调用点**上：只写 /buildKernelOptions\(context, pluginRoot\)/
-  // 会连函数**定义**（export function buildKernelOptions(context, pluginRoot) {）
-  // 一起匹配上，于是「调用点被换成别的参数」这种变异照样漏过 —— 控制器实测过。
-  const source = readFileSync(
-    join(import.meta.dirname, '..', 'miniapp', 'node', 'server.mjs'),
-    'utf8',
-  );
-  assert.match(source, /const kernelOptions = buildKernelOptions\(context, pluginRoot\);/);
+// ---- 内核运行路径的三层行为护栏 ----
+// 上一轮的护栏只锚在「调用点字面量存在」，没验证数据流：把 helper 的结果在
+// 传给 runKernel 之前覆写掉，测试照样全绿（评审方用 M8 复现过，会把内核的
+// AGAISTOCK_DATA_DIR 指回插件目录）。这四条全部改成**行为断言**。
+
+test('the kernel env puts both runtime paths in the host data dir', () => {
+  const env = buildKernelEnv({ dataDir: 'D:\\host\\data' }, 'D:\\pkg');
+  assert.equal(env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
+  assert.equal(env.AGAISTOCK_DB, kernelDbPath({ dataDir: 'D:\\host\\data' }));
+  assert.equal(env.AGAISTOCK_DB, join('D:\\host\\data', 'agaistock.db'));
+  assert.equal(env.PYTHONPATH, join('D:\\pkg', 'src'));
 });
+
+test('the kernel subprocess actually receives the host data dir', async () => {
+  // 走真实的 runKernel 路径，只把 spawn 换掉 —— 观测子进程**真的**收到的 env。
+  const captured = [];
+  const fakeChild = {
+    stdout: { on() {} },
+    stderr: { on() {} },
+    kill() {},
+    on(event, handler) {
+      if (event === 'close') setImmediate(() => handler(0));
+    },
+  };
+  await runKernel(
+    ['list', '--db', 'x.db', '--json'],
+    { dataDir: 'D:\\host\\data' },
+    'D:\\pkg',
+    (command, argv, options) => {
+      captured.push({ command, argv, env: options.env });
+      return fakeChild;
+    },
+  );
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
+  assert.equal(captured[0].env.AGAISTOCK_DB, join('D:\\host\\data', 'agaistock.db'));
+  assert.equal(captured[0].env.PYTHONPATH, join('D:\\pkg', 'src'));
+});
+
+test('start() hands the host context to the kernel unchanged', async () => {
+  // 堵住「在 helper 之后覆写」这一类：只要 start() 递给内核的不是宿主给的
+  // context 原样，这条就红。start() 若绕过 createKernel 直接调 runKernel，
+  // 下面的 seen 会是空的 —— 一样红。
+  const seen = [];
+  const pluginRoot = join(import.meta.dirname, '..');
+  const dataDir = join(import.meta.dirname, '..', '..', '..', '.tmp', 'task20-fix2-test-data');
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  const handle = await start(context, {
+    createKernel: (ctx, root, dbPath) => (args) => {
+      seen.push({ ctx, root, dbPath, args });
+      return Promise.resolve({ code: 0, stdout: '{"items":[]}', stderr: '' });
+    },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/observations`);
+    assert.equal(response.status, 200);
+  } finally {
+    await handle.dispose();
+  }
+  assert.ok(seen.length > 0, '内核必须真的被调用，且拿到宿主给的 context');
+  assert.equal(seen[0].ctx.dataDir, dataDir);
+  assert.equal(seen[0].root, pluginRoot);
+  assert.equal(seen[0].dbPath, join(dataDir, 'agaistock.db'));
+});
+
