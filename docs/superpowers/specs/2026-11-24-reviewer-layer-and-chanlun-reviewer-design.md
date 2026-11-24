@@ -180,6 +180,10 @@ D:\workroom\agaistock\
     └── （包内**没有**运行数据目录）                            ← 数据库与缠论分析工作目录都落宿主的 `context.dataDir`（§16.2）
 ```
 
+> **「没有运行数据目录」说的是数据，不是字节码**：包内运行时仍会累积 `__pycache__`
+> 字节码（无害：只读安装时 CPython 容忍 `.pyc` 写失败，终审实测内核仍 exit 0
+> 且输出 JSON 有效）。
+
 **与初稿的三处偏离（以实现为准）**：
 
 1. **点评师放在 `src/agaistock/skills/` 下，而不是仓库根的 `skills/`**。理由：Mini App 的宿主会把插件包解到临时目录运行，业务内核必须随包走（§16.2）；点评师是内核的一部分，放在包内才能被内核 import。
@@ -748,3 +752,5 @@ ReviewVerdict
 - `persist()` 的**两条落库路径**（正常落库 / 占位→`status="error"` verdict）缺「提交进仓库」的测试锁定
 - `src/agaistock/mcp/` 的 MCP 工具暴露
 - 上游 `resonance` / `window_alignment` / `key_levels` 未接入（设计级，下一轮）
+- `AGAISTOCK_DATA_DIR` 若给的是**相对路径**，会按内核 cwd 解析（安装副本里 cwd 就是包根）→ 将来要加绝对路径守卫；宿主目前总是给绝对路径，暂不可达。
+- 回落值 `repo_root()/"data"` 在**安装副本里指向包内** —— 环境变量是唯一的护栏，宿主侧一旦回归，缺陷会静默复活。（`buildKernelOptions` 把映射收到一处 + 源码断言，只能挡住本仓库内的改动，挡不住宿主回归。）

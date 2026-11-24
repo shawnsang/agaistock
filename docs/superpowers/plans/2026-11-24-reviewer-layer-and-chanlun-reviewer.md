@@ -5026,6 +5026,8 @@ def cmd_review(args) -> int:
             symbol=args.symbol,
             name=args.name,
             now=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            # 已被 Task 20 取代（见 Task 20 小节）：改用 config.data_dir()，
+            # 运行期数据落宿主的 context.dataDir，不落插件包（安装产物）
             data_dir=config.repo_root() / "data",
             # 措辞层接线：环境变量没配全时 from_env() 返回 None → 点评保留规则层原文
             llm=llm_client.from_env(),
@@ -8137,9 +8139,14 @@ work_dir.mkdir(parents=True, exist_ok=True)
 
 两条后果：
 
-1. **污染安装产物**：上游脚本产出的 K 线与结构 JSON（实测 9 个文件）落进插件包目录。
+1. **污染安装产物**：上游脚本产出的 K 线与结构 JSON 落进插件包目录
+   （安装副本的 `package/data/chanlun/002378/` 下有 9 个文件；来源见下面的注）。
    `data/` 已被 `.gitignore` 忽略，所以这些文件**不随包发布**，但每次运行都会在
    安装目录里重新生成一批。
+   > **来源说明**：宿主**会把 gitignored 产物一并拷进安装副本**（安装副本里 `.pyc` 的
+   > mtime 与仓库里的一致），所以那 9 个文件**分不清是运行时写的还是宿主拷的**。
+   > 缺陷本身由**代码 + 只读安装复现**证明（不复现时 `work_dir.mkdir` 抛
+   > `PermissionError`），不靠文件计数。
 2. **只读安装会直接崩**：`work_dir.mkdir(parents=True, exist_ok=True)` 在只读目录上抛
    `PermissionError` → 点评师整体失败 → 正是 Task 17 想根除的那类「内核失败被隐藏」。
 

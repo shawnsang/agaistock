@@ -104,6 +104,23 @@ const KERNEL_SRC = join(PLUGIN_ROOT, 'src');
 const KERNEL_TIMEOUT_MS = 180000;
 
 /**
+ * 内核子进程的启动参数。
+ *
+ * **由这里独占 `context.dataDir → {dbPath, dataDir}` 的映射** —— 数据库与
+ * 缠论分析工作目录都必须落宿主给的数据目录，不能落插件目录（安装产物，
+ * 可能被重装覆盖，也可能只读安装）。一处说了算，别在别处再拼一遍。
+ */
+export function buildKernelOptions(context, pluginRoot) {
+  const dataDir = context.dataDir;
+  return {
+    cwd: pluginRoot,
+    pythonPath: join(pluginRoot, 'src'),
+    dbPath: join(dataDir, 'agaistock.db'),
+    dataDir,
+  };
+}
+
+/**
  * 组装内核子进程的环境变量。
  *
  * 运行期的两样东西都必须落宿主给的数据目录（`context.dataDir`）：
@@ -117,6 +134,10 @@ export function buildKernelEnv(options = {}) {
     PYTHONPATH: options.pythonPath || KERNEL_SRC,
     PYTHONIOENCODING: 'utf-8',
   };
+  // 内核的运行路径**只由宿主显式给的 option 决定**。不能让宿主环境里残留的
+  // 同名变量继承进内核 —— 否则宿主里一个旧路径就能把内核写到别处。
+  delete env.AGAISTOCK_DB;
+  delete env.AGAISTOCK_DATA_DIR;
   if (options.dbPath) env.AGAISTOCK_DB = options.dbPath;
   if (options.dataDir) env.AGAISTOCK_DATA_DIR = options.dataDir;
   return env;
@@ -472,13 +493,10 @@ export async function start(context) {
   // 运行数据落宿主给的数据目录，**不是**插件目录 ——
   // 插件目录是安装产物（可能被只读安装、也可能被 Host 重装覆盖），
   // dataDir 才是运行时可写、跨重启保留的数据位置。
-  const dbPath = join(dataDir, 'agaistock.db');
-  const kernel = (args) => runKernel(args, {
-    cwd: pluginRoot,
-    pythonPath: join(pluginRoot, 'src'),
-    dbPath,
-    dataDir,
-  });
+  // 映射由 buildKernelOptions 一处说了算，别在这里再拼一遍。
+  const kernelOptions = buildKernelOptions(context, pluginRoot);
+  const dbPath = kernelOptions.dbPath;
+  const kernel = (args) => runKernel(args, kernelOptions);
 
   const server = createServer((request, response) => {
     void handleRoute(request, response, {

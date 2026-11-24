@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { handleRoute, buildKernelEnv } from '../miniapp/node/server.mjs';
+import { handleRoute, buildKernelEnv, buildKernelOptions } from '../miniapp/node/server.mjs';
 
 function makeRequest(method, url, body) {
   return {
@@ -288,4 +288,42 @@ test('the kernel env never invents a data dir on its own', () => {
 test('a blank data dir is not a usable path', () => {
   const env = buildKernelEnv({ dataDir: '' });
   assert.equal(env.AGAISTOCK_DATA_DIR, undefined);
+});
+
+test('the kernel options carry the host data dir, not the plugin dir', () => {
+  const context = { dataDir: 'D:\\host\\data', pluginRoot: 'D:\\pkg' };
+  const opts = buildKernelOptions(context, 'D:\\pkg');
+  assert.equal(opts.dataDir, 'D:\\host\\data');
+  assert.equal(opts.dbPath, join('D:\\host\\data', 'agaistock.db'));
+  assert.notEqual(opts.dataDir, 'D:\\pkg');
+});
+
+test('the kernel env is decided by the options, not by the host environment', () => {
+  // 宿主环境里残留同名变量时，内核也**不能**继承它 —— 否则宿主一个旧路径
+  // 就能把内核写到别处（曾经让本文件两条断言在 ambient env 下 fail 2）。
+  process.env.AGAISTOCK_DATA_DIR = 'D:\\ambient\\host\\data';
+  process.env.AGAISTOCK_DB = 'D:\\ambient\\host\\data\\agaistock.db';
+  try {
+    const bare = buildKernelEnv({});
+    assert.equal(bare.AGAISTOCK_DATA_DIR, undefined);
+    assert.equal(bare.AGAISTOCK_DB, undefined);
+    const explicit = buildKernelEnv({ dbPath: 'D:\\x\\a.db', dataDir: 'D:\\x' });
+    assert.equal(explicit.AGAISTOCK_DATA_DIR, 'D:\\x');
+    assert.equal(explicit.AGAISTOCK_DB, 'D:\\x\\a.db');
+  } finally {
+    delete process.env.AGAISTOCK_DATA_DIR;
+    delete process.env.AGAISTOCK_DB;
+  }
+});
+
+test('start() wires the kernel through buildKernelOptions', () => {
+  // 堵住「绕过 helper 直接手写 options」这条路。
+  // ⚠️ 断言必须锚在**调用点**上：只写 /buildKernelOptions\(context, pluginRoot\)/
+  // 会连函数**定义**（export function buildKernelOptions(context, pluginRoot) {）
+  // 一起匹配上，于是「调用点被换成别的参数」这种变异照样漏过 —— 控制器实测过。
+  const source = readFileSync(
+    join(import.meta.dirname, '..', 'miniapp', 'node', 'server.mjs'),
+    'utf8',
+  );
+  assert.match(source, /const kernelOptions = buildKernelOptions\(context, pluginRoot\);/);
 });
