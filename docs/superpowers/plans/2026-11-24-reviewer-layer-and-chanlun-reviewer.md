@@ -5541,14 +5541,18 @@ test('renderReviews marks failed reviewer', () => {
 });
 
 test('renderScore marks no_reviewer dimension explicitly', () => {
+  // 本轮只有 anchor-chanlun 一个点评师：它贡献「证伪条件」与「位置与时机」，
+  // 其余三个维度恒为 no_reviewer，从加权平均的分子分母一并剔除（设计文档 §5.2）。
+  // 所以实际分母是 0.25 + 0.15 = 0.40，不是 1.0。
   const score = {
     total: 88,
     score_breakdown: [
       { dimension: '位置与时机', weight: 0.15, raw: 88, weighted: 13.2, completeness: 'ok', contributions: [] },
-      { dimension: '证伪条件', weight: 0.25, raw: null, weighted: null, completeness: 'no_reviewer', contributions: [] },
+      { dimension: '证伪条件', weight: 0.25, raw: 92, weighted: 23, completeness: 'ok', contributions: [] },
+      { dimension: '事实锚定', weight: 0.25, raw: null, weighted: null, completeness: 'no_reviewer', contributions: [] },
     ],
-    scored_dimensions: ['位置与时机'],
-    score_denominator: 0.15,
+    scored_dimensions: ['位置与时机', '证伪条件'],
+    score_denominator: 0.4,
   };
   const html = renderScore(score);
   assert.match(html, /无人点评/);
