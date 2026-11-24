@@ -2319,9 +2319,16 @@ Expected: 打印出 day 级别的 bias / signal 与共振档位。
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/agaistock/skills
+git add src/agaistock/skills tests/test_chanlun_engine.py
 git commit -m "feat: vendor chanlun core and three-level structure orchestration"
 ```
+
+> 上游脚本的 CLI 契约已核对（控制器实测 `chanlun-core/scripts/`）：
+> `chan_analyze.py <workdir> --level <week|day|m30>` 读 `kline_<level>.json`、写 `chan_analysis_<level>.json`；
+> `chan_multi_level.py <workdir> --symbol X --name Y` 读三个 `chan_analysis_*.json`、写 `chan_multi_level.json`。
+> 两个脚本都会 `os.chdir(workdir)`，所以必须传 workdir **且** `cwd=work_dir`。
+> 上游 `LEVEL_META` 的键就是 `week` / `day` / `m30`，与本任务的 `LEVELS` / `LEVEL_ORDER` 一致。
+> 缠论上游脚本**只读不改**：拷进来之后不要改其中任何一行。
 
 ---
 
