@@ -402,6 +402,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -443,6 +444,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _new_id(prefix: str) -> str:
+    """生成带前缀的主键。
+
+    秒级时间戳 + uuid 后缀：同一秒内重复落库（同一 reviewer 连续两次运行）
+    也不会撞主键，符合"每次运行都追加一行"的约束。
+    """
+    return f"{prefix}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+
 def connect(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -473,7 +483,7 @@ def _position_json(observation: dict[str, Any]) -> str:
 
 
 def insert_observation(conn: sqlite3.Connection, observation: dict[str, Any]) -> str:
-    obs_id = observation.get("id") or f"obs_{datetime.now().strftime('%Y%m%d%H%M%S')}_{abs(hash(str(observation))) % 100000}"
+    obs_id = observation.get("id") or _new_id("obs")
     conn.execute(
         """INSERT INTO observations
            (id, symbol, name, created_at, direction, thesis, confidence,
@@ -516,7 +526,7 @@ def soft_delete_observation(conn: sqlite3.Connection, observation_id: str) -> bo
 
 
 def insert_review(conn: sqlite3.Connection, observation_id: str, verdict: dict[str, Any]) -> str:
-    review_id = f"rev_{datetime.now().strftime('%Y%m%d%H%M%S')}_{abs(hash(verdict.get('reviewer_id', ''))) % 100000}"
+    review_id = _new_id("rev")
     conn.execute(
         """INSERT INTO reviews
            (id, observation_id, reviewer_id, reviewer_version, ran_at, status,
@@ -950,10 +960,13 @@ git commit -m "feat: reviewer contract with ReviewVerdict and validation"
 **Interfaces:**
 - Consumes: `config.load_reviewers()`（Task 1）、`ReviewContext` / `ReviewVerdict` / `validate_verdict`（Task 3）、`storage.db.insert_review`（Task 2）
 - Produces:
-  - `agaistock.reviewers.registry.load_reviewers(specs: list[dict] | None = None) -> list[dict]`，每项补 `instance`（已实例化的点评师对象）。
-  - `agaistock.reviewers.registry.instantiate(spec: dict) -> Reviewer`，按 `module` 路径动态导入并取类 `Reviewer`。
-  - `agaistock.reviewers.engine.run_reviews(verdicts: list[ReviewVerdict], conn, observation_id: str) -> list[dict]`，**逐个调用、失败隔离、全部落库**，返回落库后的 verdict 字典列表（含 `status="error"` 的失败项）。
-  - `agaistock.reviewers.engine.run_one(reviewer, ctx: ReviewContext) -> ReviewVerdict`，异常时返回 `status="error"` 的 verdict 而非抛出。
+  - `agaistock.reviewers.registry.load_reviewers(specs: list[dict] | None = None) -> list[dict]`，每项补 `instance`。
+    单个点评师装载失败（模块不存在、导入期抛错）**不拖垮整轮**：该项 `instance` 是降级实例，
+    并在 `error` 里记下是谁、哪个模块、原始异常是什么；降级实例在 review 时抛错，
+    由引擎转成 `status="error"` 的 verdict 落库。
+  - `agaistock.reviewers.registry.instantiate(spec: dict) -> Reviewer`，按 `module` 路径动态导入并解析点评师类：
+    优先精确同名 `Reviewer`；只有一个 `*Reviewer` 结尾的候选时用它；多个候选且无精确同名时抛错并列出候选名。
+  - `agaistock.reviewers.engine.run_one(reviewer, ctx: ReviewContext) -> ReviewVerdict`，**异常或契约校验失败都转为 `status="error"` 的 verdict**（绝不向上抛）；校验不通过的结论不落成有效结论：findings 被丢弃，只在 caveats 里留下错误。
   - `agaistock.reviewers.engine.run_reviewers(reviewers: list, ctx: ReviewContext) -> list[ReviewVerdict]`，依次执行所有点评师，返回全部结果（含失败项）。
   - `agaistock.reviewers.engine.persist(conn, observation_id: str, verdicts: list[ReviewVerdict]) -> list[dict]`，把 verdict 落库，返回落库后的字典列表。
 
@@ -1041,7 +1054,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(verdict.status, "error")
         self.assertIn("炸了", verdict.caveats[0])
 
-    def test_run_reviews_isolates_failures_and_keeps_both(self):
+    def test_run_reviewers_isolates_failures_and_keeps_both(self):
         ctx = contract.ReviewContext(
             observation={}, symbol="002378", name="章源钨业", now="t",
             data_dir=".", llm=None,
@@ -1076,27 +1089,86 @@ import importlib
 from .. import config
 
 
+class _UnavailableReviewer:
+    """模块导入失败时的降级点评师。
+
+    降级实例让注册流程保持"逐个隔离"的语义：某个点评师的模块坏了，
+    其它点评师照常运行，坏掉的那位在调用 review 时抛错，由引擎转成
+    status='error' 的 verdict 落库。
+    """
+
+    def __init__(self, reviewer_id: str, message: str) -> None:
+        self.id = reviewer_id
+        self.version = "0.0.0"
+        self._message = message
+
+    def review(self, ctx):
+        raise RuntimeError(self._message)
+
+
 def load_reviewers(specs: list[dict] | None = None) -> list[dict]:
-    """返回启用的点评师配置，每项附加 `instance`。"""
+    """返回启用的点评师配置，每项附加 `instance`。
+
+    单个点评师的装载故障（模块不存在、导入期抛异常、类名不明确……）不影响
+    其它点评师：该项 `instance` 是降级实例，`error` 记录是谁、哪个模块、
+    原始异常是什么。降级实例在 review 时抛错，由引擎转成 status='error'
+    的 verdict 落库，保证"结论必须全部落库"。
+    """
     specs = specs if specs is not None else config.load_reviewers()
     loaded = []
     for spec in specs:
         if not spec.get("enabled", True):
             continue
         item = dict(spec)
-        item["instance"] = instantiate(spec)
+        try:
+            item["instance"] = instantiate(spec)
+        except Exception as exc:  # noqa: BLE001 —— 单个点评师坏了不能拖垮整轮
+            message = (
+                f"点评师 {spec.get('id', 'unknown')} 的模块 "
+                f"{spec.get('module', '<未声明>')} 装载失败: {type(exc).__name__}: {exc}"
+            )
+            item["instance"] = _UnavailableReviewer(str(spec.get("id", "unknown")), message)
+            item["error"] = message
         loaded.append(item)
     return loaded
 
 
 def instantiate(spec: dict):
-    """按 `module` 路径导入模块，取其中的 `Reviewer` 类并实例化。"""
+    """按 `module` 路径导入模块，取其中的点评师类并实例化。
+
+    类名解析规则（不做静默猜测）：
+      1. 精确同名 `Reviewer` 的类；
+      2. 只有一个名字以 `Reviewer` 结尾的候选类时用它（兼容 `FakeReviewer`）；
+      3. 多个候选且没有精确同名时抛错并列出候选名。
+
+    模块缺失或导入失败时抛错（由调用方决定是否隔离）。
+    """
     module_path = spec["module"]
-    module = importlib.import_module(module_path)
-    cls = getattr(module, "Reviewer", None)
-    if cls is None:
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as exc:
+        raise ImportError(f"点评师模块 {module_path} 导入失败: {exc}") from exc
+    return _reviewer_class(module, module_path)()
+
+
+def _reviewer_class(module, module_path: str) -> type:
+    candidates = sorted(
+        name
+        for name, value in vars(module).items()
+        if isinstance(value, type)
+        and name.endswith("Reviewer")
+        and not getattr(value, "_is_protocol", False)
+    )
+    if "Reviewer" in candidates:
+        return getattr(module, "Reviewer")
+    if len(candidates) == 1:
+        return getattr(module, candidates[0])
+    if not candidates:
         raise ImportError(f"模块 {module_path} 中没有 Reviewer 类")
-    return cls()
+    raise ImportError(
+        f"模块 {module_path} 中有多个候选点评师类（{', '.join(candidates)}），"
+        "无法确定用哪一个：请把实现类命名为 Reviewer"
+    )
 ```
 
 - [ ] **Step 4: 实现 engine.py**
@@ -1110,44 +1182,94 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
-from .contract import ReviewContext, ReviewVerdict
+from .contract import ReviewContext, ReviewVerdict, validate_verdict
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _dimension_names() -> list[str]:
+    """评分维度名列表，来自 config/scoring.json。"""
+    from .. import config
+
+    return [item["name"] for item in config.load_scoring()["dimensions"]]
+
+
+def _error_verdict(
+    reviewer_id: str,
+    reviewer_version: str,
+    duration_ms: int,
+    caveats: list[str],
+) -> ReviewVerdict:
+    return ReviewVerdict(
+        reviewer_id=reviewer_id,
+        reviewer_version=reviewer_version,
+        ran_at=_now_iso(),
+        status="error",
+        duration_ms=duration_ms,
+        data_refs=[],
+        findings=[],
+        proposed_invalidation=[],
+        horizon_hint=None,
+        caveats=list(caveats),
+    )
+
+
+def _validation_errors(verdict: ReviewVerdict) -> list[str]:
+    """契约校验错误列表；配置读不到时也降级成一条错误，不向上抛。"""
+    try:
+        dimensions = _dimension_names()
+    except Exception as exc:  # noqa: BLE001 —— 配置问题也要隔离
+        return [f"无法读取评分维度配置: {type(exc).__name__}: {exc}"]
+    return validate_verdict(verdict, dimensions)
+
+
 def run_one(reviewer, ctx: ReviewContext) -> ReviewVerdict:
-    """执行单个点评师；异常转为 status='error' 的 verdict，绝不向上抛。"""
+    """执行单个点评师；异常或契约校验失败都转为 status='error' 的 verdict，绝不向上抛。
+
+    校验不通过的结论不落成有效结论：findings 被丢弃，只在 caveats 里留下错误。
+    """
     started = time.monotonic()
     try:
-        verdict = reviewer.review(ctx)
+        raw = reviewer.review(ctx)
     except Exception as exc:  # noqa: BLE001 —— 点评师故障必须被隔离
-        return ReviewVerdict(
-            reviewer_id=getattr(reviewer, "id", "unknown"),
-            reviewer_version=getattr(reviewer, "version", "0.0.0"),
-            ran_at=_now_iso(),
-            status="error",
-            duration_ms=int((time.monotonic() - started) * 1000),
-            data_refs=[],
-            findings=[],
-            proposed_invalidation=[],
-            horizon_hint=None,
-            caveats=[f"点评师执行失败: {type(exc).__name__}: {exc}"],
+        return _error_verdict(
+            getattr(reviewer, "id", "unknown"),
+            getattr(reviewer, "version", "0.0.0"),
+            int((time.monotonic() - started) * 1000),
+            [f"点评师执行失败: {type(exc).__name__}: {exc}"],
         )
     duration = int((time.monotonic() - started) * 1000)
-    return ReviewVerdict(
-        reviewer_id=verdict.reviewer_id,
-        reviewer_version=verdict.reviewer_version,
-        ran_at=verdict.ran_at or _now_iso(),
-        status=verdict.status,
-        duration_ms=duration,
-        data_refs=verdict.data_refs,
-        findings=verdict.findings,
-        proposed_invalidation=verdict.proposed_invalidation,
-        horizon_hint=verdict.horizon_hint,
-        caveats=verdict.caveats,
-    )
+    try:
+        verdict = ReviewVerdict(
+            reviewer_id=raw.reviewer_id,
+            reviewer_version=raw.reviewer_version,
+            ran_at=raw.ran_at or _now_iso(),
+            status=raw.status,
+            duration_ms=duration,
+            data_refs=raw.data_refs,
+            findings=raw.findings,
+            proposed_invalidation=raw.proposed_invalidation,
+            horizon_hint=raw.horizon_hint,
+            caveats=raw.caveats,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 点评师返回了非契约对象
+        return _error_verdict(
+            getattr(reviewer, "id", "unknown"),
+            getattr(reviewer, "version", "0.0.0"),
+            duration,
+            [f"点评师结果无法解析: {type(exc).__name__}: {exc}"],
+        )
+    errors = _validation_errors(verdict)
+    if errors:
+        return _error_verdict(
+            verdict.reviewer_id or getattr(reviewer, "id", "unknown"),
+            verdict.reviewer_version or getattr(reviewer, "version", "0.0.0"),
+            duration,
+            [f"点评师结果未通过契约校验: {err}" for err in errors],
+        )
+    return verdict
 
 
 def run_reviewers(reviewers: list, ctx: ReviewContext) -> list[ReviewVerdict]:
@@ -1205,7 +1327,9 @@ git commit -m "feat: reviewer registry and execution engine with failure isolati
 
 ```python
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agaistock.providers import mcode_cli
@@ -1243,11 +1367,29 @@ class McodeCliTests(unittest.TestCase):
         fake_run.return_value = mock.Mock(
             returncode=0, stdout=json.dumps([{"type": "text", "text": "ok"}]), stderr=""
         )
-        with mock.patch("agaistock.providers.mcode_cli.tempfile.TemporaryDirectory") as tmp_dir:
-            tmp_dir.return_value.__enter__.return_value = "C:\\a b\\tmp"
-            mcode_cli.call_connector("some__tool", {})
+        # 目录必须真实存在：实现要把 args.json 写进去，把目录存在性一起 mock 掉会写崩。
+        with tempfile.TemporaryDirectory() as root:
+            spaced = Path(root) / "a b" / "tmp"
+            spaced.mkdir(parents=True)
+            with mock.patch("agaistock.providers.mcode_cli.tempfile.TemporaryDirectory") as tmp_dir:
+                tmp_dir.return_value.__enter__.return_value = str(spaced)
+                mcode_cli.call_connector("some__tool", {})
+            args_file = spaced / "args.json"
+            # args 文件确实写进了这个带空格的目录
+            self.assertTrue(args_file.is_file())
         command = fake_run.call_args[0][0]
-        self.assertIn('"C:\\a b\\tmp', command)
+        # 含空格的路径在命令行里必须被引号包住，否则 cmd.exe 会把它拆成两个参数
+        self.assertIn(f'"{args_file}"', command)
+
+    @mock.patch("agaistock.providers.mcode_cli.subprocess.run")
+    def test_call_connector_raises_missing_cli_when_command_not_found(self, fake_run):
+        fake_run.return_value = mock.Mock(
+            returncode=1,
+            stdout="",
+            stderr="'mcode-tools' is not recognized as an internal or external command",
+        )
+        with self.assertRaises(mcode_cli.MCodedToolsMissing):
+            mcode_cli.call_connector("some__tool", {})
 
 
 if __name__ == "__main__":
@@ -1313,6 +1455,22 @@ class MCodedToolsMissing(RuntimeError):
     """mcode-tools CLI 不在 PATH 上。"""
 
 
+# shell=True 时 cmd.exe 不会抛 FileNotFoundError，而是返回非 0 退出码并在 stderr 里
+# 说明「不是内部或外部命令」。两种失败形态必须归到同一个异常类型上，否则调用方
+# 只会看到笼统的 RuntimeError。标记词刻意收窄，避免把连接器自身的报错误判成缺 CLI。
+_MISSING_CLI_MARKERS = (
+    "is not recognized",
+    "command not found",
+    "不是内部或外部命令",
+    "无法将",
+)
+
+
+def _looks_like_missing_cli(stderr: str) -> bool:
+    lowered = (stderr or "").lower()
+    return any(marker.lower() in lowered for marker in _MISSING_CLI_MARKERS)
+
+
 def call_connector(tool: str, args: dict, timeout: int = 180) -> str:
     """调用一个连接器工具，返回其 text 字段内容。"""
     with tempfile.TemporaryDirectory() as tmp:
@@ -1346,6 +1504,8 @@ def call_connector(tool: str, args: dict, timeout: int = 180) -> str:
 
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
+        if _looks_like_missing_cli(stderr):
+            raise MCodedToolsMissing("未找到 mcode-tools CLI；请确认 MCode 运行时在 PATH 中")
         raise RuntimeError(f"连接器 {tool} 调用失败(exit={result.returncode}): {stderr[:500]}")
 
     stdout = (result.stdout or "").strip()
@@ -1428,7 +1588,7 @@ def fetch_quotes(symbol: str, setcode: str) -> dict:
 python -m unittest tests.test_mcode_cli tests.test_tdx -v
 ```
 
-Expected: 9 tests PASS
+Expected: 10 tests PASS（`test_mcode_cli` 5 条 + `test_tdx` 5 条）
 
 - [ ] **Step 6: 冒烟验证真实调用（可选但强烈建议）**
 
@@ -1621,7 +1781,7 @@ git commit -m "feat: tdx Rows to eastmoney kline format adapter"
   - `agaistock.skills.anchor_chanlun.engine.vendor_root() -> Path`，指向 `vendor/chanlun-core`
   - `agaistock.skills.anchor_chanlun.engine.build_structure(symbol: str, name: str, setcode: str, work_dir: Path, kline_fetcher=tdx.fetch_kline) -> dict`
     返回 **`chan_multi_level.json` 的内容**（含 `levels` / `resonance` / `interval_nesting` / `window_alignment` / `action` / `key_levels` / `caveats`）。
-  - `agaistock.skills.anchor_chanlun.engine.load_analysis(work_dir: Path, level: str) -> dict`，读 `chan_analysis_<level>.json`。
+  - `agaistock.skills.anchor_chanlun.engine.load_analysis(work_dir: Path, level: str) -> dict`，读 `chan_analysis_<level>.json`（单级别原始分析文件，供排障与单级别调试使用）。
 
 - [ ] **Step 1: 拷贝 vendor（只读，不改一行）**
 
@@ -1701,6 +1861,19 @@ class ChanlunEngineTests(unittest.TestCase):
             engine.build_structure("002378", "章源钨业", "0", work, kline_fetcher=fake_kline)
             self.assertTrue((work / "chan_multi_level.json").is_file())
             self.assertTrue((work / "chan_analysis_day.json").is_file())
+
+    def test_load_analysis_reads_the_level_analysis_file(self):
+        with TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            engine.build_structure("002378", "章源钨业", "0", work, kline_fetcher=fake_kline)
+            analysis = engine.load_analysis(work, "day")
+            self.assertEqual(analysis["level"], "day")
+            self.assertIn("summary", analysis)
+
+    def test_load_analysis_raises_when_file_missing(self):
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError):
+                engine.load_analysis(Path(tmp), "day")
 
 
 if __name__ == "__main__":
@@ -1807,7 +1980,7 @@ def build_structure(
 python -m unittest tests.test_chanlun_engine -v
 ```
 
-Expected: 4 tests PASS
+Expected: 6 tests PASS
 
 - [ ] **Step 6: 真实数据验证（关键一步）**
 
@@ -1847,7 +2020,12 @@ git commit -m "feat: vendor chanlun core and three-level structure orchestration
 - Produces:
   - `rules.evaluate(observation: dict, structure: dict, last_close: float) -> tuple[list[Finding], list[str]]`
     返回 `(findings, caveats)`。**纯函数**，不触网、不读盘。
+    **只要产出 findings，就一定同时产出至少一条 caveat**（含常驻的结构性限制声明）——
+    契约把「有发现却无限制声明」判为非法结论，`engine.run_one` 会把这类结论整条丢弃。
   - `signals.build_invalidation(structure: dict, last_close: float) -> list[ProposedInvalidation]`
+    从中枢上下沿生成证伪位（`跌破 ZD`）与确认位（`站上 ZG`）。
+    **不按 `dist_pct` 的远近过滤**：远在 +44% 的中枢下沿同样是有效失效位；
+    「邻近带」只用于 `rules.py` 的 `CHAN_NEARBY_SUPPLY_BAND` 规则。
   - `signals.build_horizon_hint(observation: dict, structure: dict, findings: list[Finding], last_close: float = 0.0) -> HorizonHint`
   - 规则常量：`rules.RULE_DELTAS`（code → delta 的映射表，便于集中调参与锁定语义）
 
@@ -1923,6 +2101,21 @@ class RulesTests(unittest.TestCase):
         self.assertEqual(matching[0].delta, 0)
         self.assertTrue(any("位置" in c for c in caveats))
 
+    def test_position_vs_trend_mismatch_is_detected_on_m30_level(self):
+        st = structure()
+        st["levels"]["m30"]["bias"] = "up"
+        st["levels"]["m30"]["trend_direction"] = "down"
+        findings, _ = rules.evaluate(BULLISH, st, 15.54)
+        matching = [f for f in findings if f.code == "CHAN_POSITION_VS_TREND"]
+        self.assertTrue(matching)
+        self.assertEqual(matching[0].delta, 0)
+        self.assertTrue(any("chan.levels.m30.bias" in f.evidence_ref for f in matching))
+
+    def test_evaluate_always_returns_a_caveat_when_there_are_findings(self):
+        findings, caveats = rules.evaluate(BULLISH, structure(), 15.54)
+        self.assertTrue(findings)
+        self.assertTrue(caveats)
+
     def test_every_finding_has_dimension_and_nonzero_or_zero_delta(self):
         st = structure()
         st["levels"]["week"]["bias"] = "down"
@@ -1972,6 +2165,27 @@ class SignalsTests(unittest.TestCase):
         ]
         result = signals.build_invalidation(st, 15.54)
         self.assertTrue(any(p.comparator == "below" for p in result))
+
+    def test_build_invalidation_emits_below_level_when_price_is_inside_band(self):
+        st = structure()
+        st["levels"]["day"]["nearby_pivots"] = [
+            {"from": "2025-08-04", "to": "2026-02-05", "ZD": 11.84, "ZG": 14.05,
+             "role": "current", "dist_pct": -9.59}
+        ]
+        result = signals.build_invalidation(st, 13.0)
+        below = [p for p in result if p.comparator == "below"]
+        self.assertTrue(below)
+        self.assertTrue(any("11.84" in p.desc for p in below))
+
+    def test_build_invalidation_keeps_levels_far_below_price(self):
+        # 证伪位不按「距现价远近」过滤：远在脚下的中枢下沿同样是有效的失效位。
+        st = structure()
+        st["levels"]["day"]["nearby_pivots"] = [
+            {"from": "2023-01-04", "to": "2023-05-04", "ZD": 8.0, "ZG": 9.0,
+             "role": "support", "dist_pct": -42.0}
+        ]
+        result = signals.build_invalidation(st, 15.54)
+        self.assertTrue(any("8.0" in p.desc for p in result))
 
     def test_build_horizon_hint_takes_most_conservative(self):
         st = structure()
@@ -2041,6 +2255,16 @@ RULE_DELTAS: dict[str, int] = {
 FAR_FROM_PRICE_PCT = 15.0
 NEAR_BAND_PCT = 10.0
 
+LEVEL_LABELS = {"week": "周线", "day": "日线", "m30": "30 分钟"}
+
+# 常驻限制声明：只要给出了发现，就必须同时给出限制。
+# 契约（Task 3 的 validate_verdict）把「有发现却没有限制声明」判为非法结论，
+# engine.run_one 会把这类结论整条丢弃 —— 所以这里必须自己保证不为空。
+STANDING_CAVEAT = (
+    "本结论基于缠论结构识别：中枢、分笔与背驰窗口由上游脚本按固定规则判定，"
+    "只对本次取数窗口内的结构负责；结构识别本身有窗口与样本限制，不构成投资建议。"
+)
+
 
 def _level(structure: dict[str, Any], name: str) -> dict[str, Any]:
     return (structure.get("levels") or {}).get(name) or {}
@@ -2072,8 +2296,6 @@ def evaluate(observation: dict, structure: dict, last_close: float) -> tuple[lis
 
     week_bias = week.get("bias")
     day_signal = day.get("signal") or ""
-    day_bias = day.get("bias")
-    day_trend = day.get("trend_direction")
 
     # 纪律二：小级别服从大级别
     if week_bias == "down" and direction == "bullish":
@@ -2121,21 +2343,22 @@ def evaluate(observation: dict, structure: dict, last_close: float) -> tuple[lis
         ))
 
     # 纪律二十一：位置读数 ≠ 趋势性质
-    if week_bias and week.get("trend_direction") and week_bias != week.get("trend_direction"):
+    # 三个级别都要看：位置/趋势背离在任何级别上都成立，只看日线会漏掉周线与 30 分钟的背离。
+    for level_name, level in (("week", week), ("day", day), ("m30", m30)):
+        bias = level.get("bias")
+        trend = level.get("trend_direction")
+        if not bias or not trend or bias == trend:
+            continue
+        label = LEVEL_LABELS[level_name]
         caveats.append(
-            f"周线位置读数为 {week_bias}，但趋势性质为 {week.get('trend_direction')}；"
+            f"{label}位置读数为 {bias}，但趋势性质为 {trend}；"
             "位置读数只代表价格相对最近中枢的位置，不代表趋势已经改变"
         )
-    if day_bias and day_trend and day_bias != day_trend:
-        caveats.append(
-            f"日线位置读数为 {day_bias}，趋势性质为 {day_trend}；两者是两个维度，不可混读"
-        )
-    if day_bias != day_trend:
         findings.append(_finding(
             "CHAN_POSITION_VS_TREND", "info",
-            f"日线位置 {day_bias} 与趋势性质 {day_trend} 不一致",
+            f"{label}位置 {bias} 与趋势性质 {trend} 不一致",
             "价格刚站上或跌破中枢沿会翻转位置读数，但趋势性质往往未变。",
-            ["chan.levels.day.bias", "chan.levels.day.trend_direction"],
+            [f"chan.levels.{level_name}.bias", f"chan.levels.{level_name}.trend_direction"],
             "读结论时以趋势性质为准，位置读数仅作参考",
         ))
 
@@ -2253,6 +2476,10 @@ def evaluate(observation: dict, structure: dict, last_close: float) -> tuple[lis
             "MACD 柱与 DIF 都会在收盘后变化，结论需收盘后复校"
         )
 
+    # 有发现就必须有限制声明（见 STANDING_CAVEAT 的说明）。
+    if findings:
+        caveats.append(STANDING_CAVEAT)
+
     return findings, caveats
 ```
 
@@ -2267,48 +2494,75 @@ from typing import Any
 from ...reviewers.contract import Finding, HorizonHint, ProposedInvalidation
 
 TOLERANCE_PCT = 0.5
-NEAR_BAND_PCT = 10.0
 
 
 def _levels(structure: dict[str, Any]) -> dict[str, Any]:
     return structure.get("levels") or {}
 
 
+def _position(last_close: float, zd: float, zg: float) -> str:
+    """现价相对中枢的位置：above / inside / below。"""
+    if last_close > zg:
+        return "above"
+    if last_close >= zd:
+        return "inside"
+    return "below"
+
+
+def _below_rationale(level_name: str, position: str, zd: float, zg: float) -> str:
+    """跌破中枢下沿的含义随现价位置而变，写清楚才不会被误读。"""
+    if position == "inside":
+        return f"价格跌出 {level_name} 中枢下沿 {zd} 即视为判断错误"
+    if position == "above":
+        return (
+            f"价格已站在 {level_name} 中枢上方，跌破该支撑带下沿 {zd} 即视为判断错误"
+            f"（中枢区间 {zd}~{zg}）"
+        )
+    return (
+        f"{level_name} 中枢位于现价上方（{zd}~{zg}），跌破下沿 {zd} 属于已发生的事实，"
+        "此处只作结构失效参考，不作为本次的失效判定"
+    )
+
+
 def build_invalidation(structure: dict, last_close: float) -> list[ProposedInvalidation]:
-    """从中枢上下沿生成建议的证伪条件与确认位。"""
+    """从中枢上下沿生成建议的证伪条件与确认位。
+
+    证伪位取中枢下沿 ZD，**不按距现价的远近过滤**：一个远在 +44% 的中枢下沿
+    仍然是有效的失效位（跌回去说明结构被证伪）。若用 dist_pct 当门槛，证伪位
+    会被全部过滤掉，「建议的证伪条件」与观察期 checks 就永远是空的。
+    「邻近带」只用于 rules.py 的 CHAN_NEARBY_SUPPLY_BAND 规则。
+
+    跌破 ZD 在三种位置下都要给出（现价在带下 / 带内 / 带上）：
+      - 带内：跌出中枢 → 结构走坏
+      - 带上（支撑带在脚下）：跌破支撑带下沿 → 支撑失效
+      - 带下（供给带在头顶）：条件已成立，只作结构参考
+    """
     result: list[ProposedInvalidation] = []
     for level_name in ("day", "week", "m30"):
         level = _levels(structure).get(level_name) or {}
         for pivot in level.get("nearby_pivots") or []:
             zd = pivot.get("ZD")
             zg = pivot.get("ZG")
-            dist = pivot.get("dist_pct")
             if not isinstance(zd, (int, float)) or not isinstance(zg, (int, float)):
                 continue
-            if not isinstance(dist, (int, float)) or abs(dist) > NEAR_BAND_PCT:
+            if zd <= 0 or zg <= zd:
                 continue
-            if zd <= last_close <= zg:
-                result.append(ProposedInvalidation(
-                    desc=f"跌破 {level_name} 中枢下沿 {zd}",
-                    source=f"chan.levels.{level_name}.nearby_pivots[].ZD",
-                    comparator="below",
-                    tolerance=TOLERANCE_PCT,
-                    rationale=f"价格回落至 {level_name} 中枢下沿 {zd} 之下即视为判断错误",
-                ))
+            position = _position(last_close, zd, zg)
+            result.append(ProposedInvalidation(
+                desc=f"跌破 {level_name} 中枢下沿 {zd}",
+                source=f"chan.levels.{level_name}.nearby_pivots[].ZD",
+                comparator="below",
+                tolerance=TOLERANCE_PCT,
+                rationale=_below_rationale(level_name, position, zd, zg),
+            ))
+            if position != "above":
+                # 现价已经在上沿之上时，「站上 ZG」已经成立，不再作为待确认条件给出。
                 result.append(ProposedInvalidation(
                     desc=f"站上 {level_name} 中枢上沿 {zg}",
                     source=f"chan.levels.{level_name}.nearby_pivots[].ZG",
                     comparator="above",
                     tolerance=TOLERANCE_PCT,
                     rationale=f"价格站上 {level_name} 中枢上沿 {zg} 视为主张被强化",
-                ))
-            elif last_close < zd:
-                result.append(ProposedInvalidation(
-                    desc=f"跌破 {level_name} 中枢下沿 {zd}",
-                    source=f"chan.levels.{level_name}.nearby_pivots[].ZD",
-                    comparator="below",
-                    tolerance=TOLERANCE_PCT,
-                    rationale=f"价格跌破 {level_name} 中枢下沿 {zd} 即视为判断错误",
                 ))
     return result
 
@@ -2363,7 +2617,7 @@ def build_horizon_hint(
 python -m unittest tests.test_chanlun_rules -v
 ```
 
-Expected: 14 tests PASS
+Expected: 18 tests PASS（`RulesTests` 11 条 + `SignalsTests` 7 条）
 
 - [ ] **Step 6: Commit**
 
@@ -2391,6 +2645,8 @@ git commit -m "feat: chanlun rules layer mapping disciplines to findings and sig
     `context` 可携带缠论结构语境（`narrative` / `resonance` / `framework.discipline` / `signal_detail`），
     让 LLM 点评时有整体参照，而不是逐条孤立改写。
   - `agaistock.skills.anchor_chanlun.wording.PROTECTED = ("code", "severity", "dimension", "delta", "evidence_ref")`
+    校验口径：**只校验 LLM 实际返回了的字段**。字段缺失 = LLM 没动它（不算篡改）；
+    字段存在但值与原值不同 = 篡改 → 丢弃该条 LLM 输出，保留规则层原文。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -2439,10 +2695,16 @@ class WordingTests(unittest.TestCase):
         self.assertEqual(result[0].code, "CHAN_DAY_TOP_DIVERGENCE")
 
     def test_discards_llm_output_that_tampered_protected_fields(self):
-        llm = FakeLlm('{"items":[{"code":"X","severity":"info","dimension":"一致性","delta":99,"claim":"篡改"}]}')
+        # 同一个 code，但 severity / dimension / delta 被改了 → 整条丢弃，保留规则层原文
+        llm = FakeLlm(
+            '{"items":[{"code":"CHAN_DAY_TOP_DIVERGENCE","severity":"info",'
+            '"dimension":"一致性","delta":99,"claim":"篡改"}]}'
+        )
         result = wording.phrase([finding()], {"thesis": "t"}, llm=llm)
         self.assertEqual(result[0].claim, "原始表述")
         self.assertEqual(result[0].delta, -12)
+        self.assertEqual(result[0].severity, "critical")
+        self.assertEqual(result[0].dimension, "位置与时机")
 
     def test_survives_llm_exception(self):
         class Boom:
@@ -2613,9 +2875,15 @@ def _extract_json(text: str) -> dict | None:
 
 
 def _matches_protected(original: Finding, item: dict[str, Any]) -> bool:
+    """只校验 LLM **实际返回了**的受保护字段。
+
+    字段缺失 = LLM 没有动这个字段（不算篡改）；字段存在但值与原值不同 = 篡改。
+    要求五个字段全部出现是错的：正常的措辞回复只带 code + claim，
+    会被误判成篡改而整条丢弃。
+    """
     for field in PROTECTED:
         if field not in item:
-            return False
+            continue
         current = getattr(original, field)
         proposed = item[field]
         if isinstance(current, list):
@@ -2723,7 +2991,8 @@ git commit -m "feat: llm wording layer with protected field validation and fallb
 - Consumes: `rules.evaluate` / `signals.*`（Task 8）、`wording.phrase`（Task 9）、`build_structure`（Task 7）、`ReviewContext`（Task 3）
 - Produces:
   - `agaistock.skills.anchor_chanlun.reviewer.Reviewer` —— 类，含 `id = "anchor-chanlun"`、`version = "0.1.0"`、`review(ctx: ReviewContext) -> ReviewVerdict`。
-  - `reviewer.last_close(payload: dict) -> float` —— 从 tdx 行情 payload 取现价。
+  - `reviewer.fetch_last_close(symbol: str, setcode: str, structure: dict | None = None) -> float` —— 取现价。
+    优先用结构里的 `levels.day.last_close`，没有才退回实时行情接口。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -2733,8 +3002,28 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from agaistock.reviewers.contract import ReviewContext
+from agaistock.reviewers.contract import Finding, ReviewContext
 from agaistock.skills.anchor_chanlun import reviewer
+
+
+def make_structure():
+    return {
+        "levels": {
+            "week": {"bias": "down", "trend_direction": "down", "signal": "无明确买卖点",
+                     "window_verdict": "结构充分", "nearby_pivots": [], "recent_divergence": None},
+            "day": {"bias": "down", "trend_direction": "down", "signal": "中枢下方 · 底背驰预警",
+                    "window_verdict": "结构充分", "nearby_pivots": [], "recent_divergence": None},
+            "m30": {"bias": "range", "trend_direction": "range", "signal": "无明确买卖点",
+                    "window_verdict": "结构充分", "nearby_pivots": [], "recent_divergence": None},
+        },
+        # 档位字母在 grade 上，level 是中文定性（见 Global Constraint 8）
+        "resonance": {"grade": "C", "level": "级别交错"},
+        "interval_nesting": {"verdict": "unconfirmed", "reason": "次级别尚无背驰"},
+        "window_alignment": {"density_balance": "balanced", "over_wide_levels": []},
+        "key_levels": {"bands": []},
+        # 上游结构自己的限制声明不能是空的
+        "caveats": ["上游结构识别基于固定窗口，样本偏薄时结论需降级使用"],
+    }
 
 
 class ReviewerTests(unittest.TestCase):
@@ -2744,21 +3033,7 @@ class ReviewerTests(unittest.TestCase):
         self.assertEqual(r.version, "0.1.0")
 
     def test_review_returns_valid_verdict(self):
-        structure = {
-            "levels": {
-                "week": {"bias": "down", "trend_direction": "down", "signal": "无明确买卖点",
-                         "window_verdict": "结构充分", "nearby_pivots": [], "recent_divergence": None},
-                "day": {"bias": "down", "trend_direction": "down", "signal": "中枢下方 · 底背驰预警",
-                        "window_verdict": "结构充分", "nearby_pivots": [], "recent_divergence": None},
-                "m30": {"bias": "range", "trend_direction": "range", "signal": "无明确买卖点",
-                        "window_verdict": "结构充分", "nearby_pivots": [], "recent_divergence": None},
-            },
-            "resonance": {"level": "B"},
-            "interval_nesting": {"verdict": "unconfirmed", "reason": "次级别尚无背驰"},
-            "window_alignment": {"density_balance": "balanced", "over_wide_levels": []},
-            "key_levels": {"bands": []},
-            "caveats": [],
-        }
+        structure = make_structure()
         with TemporaryDirectory() as tmp:
             ctx = ReviewContext(
                 observation={"symbol": "002378", "direction": "bullish", "thesis": "还能拿半年",
@@ -2773,9 +3048,30 @@ class ReviewerTests(unittest.TestCase):
         self.assertEqual(verdict.reviewer_id, "anchor-chanlun")
         self.assertEqual(verdict.status, "ok")
         self.assertTrue(verdict.findings)
+        # 有发现就必须有限制声明：否则契约校验不通过，engine.run_one 会把整条结论丢掉
         self.assertTrue(verdict.caveats)
         self.assertIsNotNone(verdict.horizon_hint)
         self.assertTrue(verdict.data_refs)
+
+    def test_review_folds_contract_validation_errors_into_caveats(self):
+        bad_finding = Finding(
+            code="CHAN_X", severity="medium", dimension="第六感", delta=-1,
+            claim="c", why="w", evidence_ref=[], suggested_fix="",
+        )
+        with TemporaryDirectory() as tmp:
+            ctx = ReviewContext(
+                observation={"symbol": "002378", "direction": "bullish", "thesis": "还能拿半年",
+                             "timeframe": "半年", "trigger": ""},
+                symbol="002378", name="章源钨业", now="2026-11-24T07:30:00Z",
+                data_dir=Path(tmp), llm=None,
+            )
+            with mock.patch.object(reviewer, "build_structure", return_value=make_structure()), \
+                 mock.patch.object(reviewer, "fetch_last_close", return_value=15.54), \
+                 mock.patch.object(reviewer.rules, "evaluate", return_value=([bad_finding], [])):
+                verdict = reviewer.Reviewer().review(ctx)
+
+        # 校验错误不吞结论，但要显式写进 caveats
+        self.assertTrue(any("契约校验" in c for c in verdict.caveats))
 
     def test_review_skips_when_symbol_missing(self):
         ctx = ReviewContext(
@@ -2805,14 +3101,31 @@ Expected: FAIL —— `ModuleNotFoundError`
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ...providers import tdx
-from ...reviewers.contract import ReviewContext, ReviewVerdict
+from ...reviewers.contract import ReviewContext, ReviewVerdict, validate_verdict
 from . import rules, signals, wording
 from .engine import build_structure
+
+
+def _dimension_names() -> list[str]:
+    """评分维度名列表，来自 config/scoring.json。"""
+    from ...config import load_scoring
+
+    return [item["name"] for item in load_scoring()["dimensions"]]
+
+
+def _validation_errors(verdict: ReviewVerdict) -> list[str]:
+    """契约校验错误列表；配置读不到时也降级成一条错误，不向上抛。"""
+    try:
+        dimensions = _dimension_names()
+    except Exception as exc:  # noqa: BLE001 —— 配置问题也要隔离
+        return [f"无法读取评分维度配置: {type(exc).__name__}: {exc}"]
+    return validate_verdict(verdict, dimensions)
 
 
 def fetch_last_close(symbol: str, setcode: str, structure: dict | None = None) -> float:
@@ -2875,6 +3188,12 @@ class Reviewer:
         last_close = fetch_last_close(symbol, setcode, structure)
 
         findings, caveats = rules.evaluate(ctx.observation, structure, last_close)
+        if ctx.llm is None:
+            # 措辞层降级必须留痕，否则用户以为看到的是 LLM 改写过的表述
+            caveats.append(
+                "LLM 措辞层不可用（未配置 AGAISTOCK_LLM_BASE_URL / API_KEY / MODEL），"
+                "点评保留规则层原文"
+            )
         findings = wording.phrase(
             findings,
             ctx.observation,
@@ -2901,7 +3220,7 @@ class Reviewer:
             }
         ]
 
-        return ReviewVerdict(
+        verdict = ReviewVerdict(
             reviewer_id=self.id,
             reviewer_version=self.version,
             ran_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -2913,6 +3232,17 @@ class Reviewer:
             horizon_hint=hint,
             caveats=caveats,
         )
+
+        # 与 engine.run_one 保持一致地做一次契约校验，但**不丢结论**：
+        # 错误写进 caveats，让「有发现却无限制声明」这类问题可见、可追。
+        errors = _validation_errors(verdict)
+        if errors:
+            verdict = replace(
+                verdict,
+                caveats=list(verdict.caveats)
+                + [f"点评结论未通过契约校验: {err}" for err in errors],
+            )
+        return verdict
 ```
 
 - [ ] **Step 4: 运行测试确认通过**
@@ -2921,7 +3251,7 @@ class Reviewer:
 python -m unittest tests.test_anchor_chanlun_reviewer -v
 ```
 
-Expected: 2 tests PASS
+Expected: 4 tests PASS
 
 - [ ] **Step 5: Commit**
 
@@ -2941,7 +3271,8 @@ git commit -m "feat: anchor-chanlun reviewer assembling rules, signals and wordi
 **Interfaces:**
 - Consumes: `ReviewVerdict`（Task 3）、`config.load_scoring()`（Task 1）
 - Produces:
-  - `agaistock.scoring.DIMENSION_WEIGHTS` 不直接硬编码，从 `config.load_scoring()` 读取。
+  - 维度与权重**不硬编码**：`aggregate` 未显式传入 `dimensions` 时，从 `config.load_scoring()` 读取
+    （模块内**没有** `DIMENSION_WEIGHTS` 常量，权重只在调用时从配置读）。
   - `agaistock.scoring.aggregate(verdicts: list[ReviewVerdict], reviewer_weights: dict[str, float] | None = None, dimensions: list[dict] | None = None) -> dict`
     返回：
     ```python
@@ -3389,7 +3720,7 @@ git commit -m "feat: observation horizon planning with conservative tier resolut
 - Create: `tests/test_cli.py`
 
 **Interfaces:**
-- Consumes: `storage.db`（Task 2）、`registry` / `engine`（Task 4）、`scoring`（Task 11）、`horizon`（Task 12）、`config`（Task 1）
+- Consumes: `storage.db`（Task 2）、`registry` / `engine`（Task 4）、`scoring`（Task 11）、`horizon`（Task 12）、`config`（Task 1）、`llm.client.from_env`（Task 9）
 - Produces CLI：
   ```
   python -m agaistock.cli review --symbol 002378 --name 章源钨业 --text "<口述原文>" [--db PATH] [--json]
@@ -3402,9 +3733,17 @@ git commit -m "feat: observation horizon planning with conservative tier resolut
   {"observation_id": "...", "reviews": [...], "score": {...}, "horizon": {...}}
   ```
   `reviews` 的 `--json` 输出为 `{"observation_id": "...", "items": [...]}`（每项含 `verdict` 字段）。
+  `list` 的 `--json` 输出为 `{"ok": true, "items": [...]}` —— **带 ok/items 外壳**，
+  与 Mini App 前端 `data.items` 的既有契约一致（Task 14 的 `/api/observations` 直接透传这份负载）。
 
   **数据库路径优先级**：命令行 `--db` > 环境变量 `AGAISTOCK_DB` > `data/agaistock.db`。
   （Task 14 的 Mini App 后端通过 `AGAISTOCK_DB` 指定路径，因此此环境变量必须被支持。）
+
+  **LLM 措辞层的接线**：`review` 用 `llm.client.from_env()` 构造客户端并传入 `ReviewContext.llm`。
+  环境变量 `AGAISTOCK_LLM_BASE_URL` / `AGAISTOCK_LLM_API_KEY` / `AGAISTOCK_LLM_MODEL`
+  缺任一 → `from_env()` 返回 `None` → 点评保留规则层原文（Task 9 的措辞层降级），
+  并在 verdict 的 caveats 里留下「措辞层不可用」的痕迹。
+  不接线的话，Task 9 的措辞层在成品 CLI 里就是死代码，Global Constraint 10 的保护从未生效。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -3461,6 +3800,26 @@ class CliTests(unittest.TestCase):
                 ])
             self.assertEqual(code, 0)
 
+    def test_review_wires_llm_client_into_review_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            sentinel = object()
+            captured = {}
+
+            def fake_run_reviewers(ctx, reviewers):
+                captured["ctx"] = ctx
+                return []
+
+            with mock.patch.object(cli, "run_reviewers", side_effect=fake_run_reviewers), \
+                 mock.patch.object(cli.llm_client, "from_env", return_value=sentinel):
+                code = cli.main([
+                    "review", "--symbol", "002378", "--name", "章源钨业",
+                    "--text", "还能拿半年", "--db", str(db_path), "--json",
+                ])
+            self.assertEqual(code, 0)
+            # 措辞层必须真的接上：ctx.llm 拿到 from_env() 的返回值
+            self.assertIs(captured["ctx"].llm, sentinel)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -3494,6 +3853,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import config, horizon as horizon_mod, scoring
+from .llm import client as llm_client
 from .reviewers import engine as engine_mod
 from .reviewers import registry
 from .storage import db
@@ -3560,7 +3920,8 @@ def cmd_review(args) -> int:
         name=args.name,
         now=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         data_dir=config.repo_root() / "data",
-        llm=None,
+        # 措辞层接线：环境变量没配全时 from_env() 返回 None → 点评保留规则层原文
+        llm=llm_client.from_env(),
     )
     verdicts = run_reviewers(ctx, reviewers)
     saved = engine_mod.persist(conn, observation_id, verdicts)
@@ -3583,6 +3944,9 @@ def cmd_review(args) -> int:
         print(f"观察期 {plan['review_at']}（档位 {plan['tier'] or '默认'}）")
         for verdict in saved:
             print(f"- {verdict['reviewer_id']} [{verdict['status']}] {len(verdict['findings'])} 条发现")
+    # 显式关闭连接：Windows 上未关闭的 sqlite 句柄会锁住 .db 文件，
+    # 临时目录清理与后续迁移都会失败（临时目录删除直接报 PermissionError）。
+    conn.close()
     return 0
 
 
@@ -3590,11 +3954,13 @@ def cmd_list(args) -> int:
     conn = _open(args.db)
     rows = db.list_observations(conn, include_deleted=args.include_deleted)
     if args.json:
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        # 带 ok/items 外壳：Mini App 前端读的是 data.items（见 Task 14 / Task 15）
+        print(json.dumps({"ok": True, "items": rows}, ensure_ascii=False, indent=2))
     else:
         for row in rows:
             marker = "（已删除）" if row.get("deleted_at") else ""
             print(f"{row['id']}  {row.get('created_at')}  {row.get('name')} {row.get('symbol')}{marker}")
+    conn.close()
     return 0
 
 
@@ -3608,6 +3974,7 @@ def cmd_reviews(args) -> int:
         for item in items:
             verdict = item.get("verdict") or {}
             print(f"{item['reviewer_id']} [{item['status']}] {len(verdict.get('findings') or [])} 条发现")
+    conn.close()
     return 0
 
 
@@ -3619,11 +3986,13 @@ def cmd_delete(args) -> int:
             print(json.dumps({"ok": False, "id": args.observation_id}, ensure_ascii=False))
         else:
             print(f"未找到或已删除：{args.observation_id}", file=sys.stderr)
+        conn.close()
         return 1
     if args.json:
         print(json.dumps({"ok": True, "id": args.observation_id}, ensure_ascii=False))
     else:
         print(f"已软删除 {args.observation_id}（不参与评分与校准统计）")
+    conn.close()
     return 0
 
 
@@ -3676,7 +4045,7 @@ if __name__ == "__main__":
 python -m unittest tests.test_cli -v
 ```
 
-Expected: 5 tests PASS
+Expected: 6 tests PASS
 
 - [ ] **Step 5: 真实跑一遍（关键一步）**
 
@@ -3705,14 +4074,30 @@ git commit -m "feat: cli entry for review, list and delete"
 - Consumes: Task 13 的 CLI（Node 侧 spawn `python -m agaistock.cli`）
 - Produces:
   - `export async function handleRoute(request, response, options = {}) -> Promise<void>`
+    依赖**全部显式注入**，不从任何闭包或模块作用域里捕获宿主对象：
+    - `options.context` —— 宿主 context（`/api/status` 用它的 `agent` / `capabilities`）。
+    - `options.clientEntry` —— `index.html` 的文本内容（`/dashboard` 用）。
+    - `options.readObservations` —— `async () => array`，旧的 JSON 文件观察库读取（`/api/status` 计数回退时用）。
+    - `options.writeObservations` —— `async (list) => void`，旧 JSON 文件观察库写入（`/api/save` 用）。
+    - `options.parseObservation` —— `async (rawText) => {ok, ...}`，解析草稿（`/api/parse` 用）。
     - `options.kernel` —— 可注入的内核调用函数，签名 `(args: string[]) => Promise<{code: number, stdout: string, stderr: string}>`。
       缺省时使用真实的 `runKernel`。**测试注入 fake kernel**，因此本任务不依赖真实数据库与网络。
     - `options.dbPath` —— 传给内核的数据库路径（缺省用工作区 `data/agaistock.db`）。
   - 路由：
-    - `GET    /api/observations` —— 列出观察（已过滤软删）
+    - `GET    /dashboard` —— 返回 `clientEntry`
+    - `GET    /api/status` —— 运行时状态 + 观察数量
+    - `GET    /api/observations` —— 列出观察（走内核 `list --json`），**返回 `{ok: true, items: [...]}`**
+    - `POST   /api/parse` —— body `{ text }` → 解析观察卡
+    - `POST   /api/save` —— body `{ draft, rawText }` → 写入旧的 JSON 文件观察库
     - `POST   /api/review` —— body `{ symbol, name, text }` → `200 {observation_id, reviews, score, horizon}`；缺 text → `400`
     - `GET    /api/observations/:id/reviews` → `200 {observation_id, items:[...]}`
     - `DELETE /api/observations/:id` → `200 {ok:true, id}`；内核返回非 0 → `404 {ok:false, error:'not_found'}`
+
+**关键设计（不可省略）**：现有 `handle` 是 `start()` 内部的**闭包**，捕获了 `context`、
+`clientEntry`、`readObservations`、`writeObservations`、`parseObservation`。
+把它直接提升为模块级导出的 `handleRoute`，这些名字就变成未定义 → `/dashboard`、
+`/api/parse`、`/api/save` 抛 ReferenceError → 500；而现有 `pipeline.test.mjs` 只测纯函数，
+**这个破坏是静默的**。所以依赖必须由 `start()` 组装后显式传入，测试则注入 fake 依赖。
 
 **设计要点**：Node 侧**不引入 sqlite 依赖**，所有数据库操作一律通过 Python 内核 CLI 完成 —— 这保持了「接入层是唯一接口」这条不变（主规格 D3），也避免 Node 与 Python 两套 schema 定义漂移。
 
@@ -3843,6 +4228,70 @@ test('POST /api/review returns 422 when kernel fails', async () => {
   assert.equal(response.statusCode, 422);
   assert.equal(response.json().ok, false);
 });
+
+test('GET /api/observations returns the ok/items envelope the front-end reads', async () => {
+  const response = new FakeResponse();
+  const kernel = fakeKernel({
+    ok: true,
+    items: [{ id: 'obs_1', created_at: '2026-11-24T07:00:00Z', symbol: '002378' }],
+  });
+  await handleRoute(
+    makeRequest('GET', '/api/observations'),
+    response,
+    { kernel, dbPath: 'test.db' },
+  );
+  assert.equal(response.statusCode, 200);
+  const payload = response.json();
+  // 前端 index.html 读的是 data.items —— 外壳不能变成裸数组
+  assert.equal(payload.ok, true);
+  assert.ok(Array.isArray(payload.items));
+  assert.equal(payload.items[0].id, 'obs_1');
+  assert.ok(kernel.calls[0].includes('list'));
+});
+
+test('GET /dashboard serves the injected client entry', async () => {
+  const response = new FakeResponse();
+  await handleRoute(
+    makeRequest('GET', '/dashboard'),
+    response,
+    { clientEntry: '<html>注入的页面</html>', kernel: fakeKernel({}) },
+  );
+  assert.equal(response.statusCode, 200);
+  assert.match(response.body, /注入的页面/);
+});
+
+test('POST /api/parse uses the injected parse helper', async () => {
+  const response = new FakeResponse();
+  const seen = [];
+  const parseObservation = async (rawText) => {
+    seen.push(rawText);
+    return { ok: true, draft: { symbol: '002378' } };
+  };
+  await handleRoute(
+    makeRequest('POST', '/api/parse', { text: '还能拿半年' }),
+    response,
+    { parseObservation, kernel: fakeKernel({}) },
+  );
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(seen, ['还能拿半年']);
+});
+
+test('POST /api/save writes through the injected observation store', async () => {
+  const response = new FakeResponse();
+  const written = [];
+  const readObservations = async () => [];
+  const writeObservations = async (list) => {
+    written.push(list);
+  };
+  await handleRoute(
+    makeRequest('POST', '/api/save', { draft: { symbol: '002378' }, rawText: '还能拿半年' }),
+    response,
+    { readObservations, writeObservations, kernel: fakeKernel({}) },
+  );
+  assert.equal(response.statusCode, 200);
+  assert.equal(written.length, 1);
+  assert.equal(written[0][0].draft.symbol, '002378');
+});
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -3867,12 +4316,14 @@ import { join } from 'node:path';
 ```javascript
 const REPO_ROOT = join(import.meta.dirname, '..', '..', '..', '..');
 const DEFAULT_DB = join(REPO_ROOT, 'data', 'agaistock.db');
+const KERNEL_TIMEOUT_MS = 180000;
 
 /**
  * 调用 Python 内核 CLI。
  *
  * Node 侧不碰 sqlite —— 数据库的唯一入口是内核（主规格 D3：接入层是唯一接口）。
  * 返回 {code, stdout, stderr}，不抛异常。
+ * 带超时：三级别取数 + 点评可能跑很久，超时按失败处理，避免请求永久挂住。
  */
 export function runKernel(args) {
   return new Promise((resolve) => {
@@ -3886,10 +4337,26 @@ export function runKernel(args) {
     });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({ code: -1, stdout, stderr: `内核调用超时（${KERNEL_TIMEOUT_MS}ms）` });
+    }, KERNEL_TIMEOUT_MS);
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', (error) => resolve({ code: -1, stdout: '', stderr: String(error.message) }));
-    child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }));
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      finish({ code: -1, stdout: '', stderr: String(error.message) });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      finish({ code: code ?? -1, stdout, stderr });
+    });
   });
 }
 
@@ -3902,64 +4369,190 @@ function parseKernelJson(stdout) {
 }
 ```
 
-把现有内联的 `async function handle(request, response) {...}` 改为导出的 `export async function handleRoute(request, response, options = {})`，并在其中：
-
-- 用 `const kernel = options.kernel ?? runKernel;`
-- 用 `const dbPath = options.dbPath ?? DEFAULT_DB;`
-- 保留原有的 `/dashboard`、`/api/status`、`/api/observations`、`/api/parse`、`/api/save` 路由（`/api/observations` 改为走 kernel `list --json`）
-- 新增路由（放在 `/api/save` 之后、`404` 兜底之前）：
+把 `start()` 内部那个捕获了 `context` / `clientEntry` / `readObservations` / `writeObservations` /
+`parseObservation` 的内联 `async function handle(request, response) {...}` **整段删掉**，
+在**模块层级**新增导出的 `handleRoute`。依赖全部从 `options` 里取，取不到就用无副作用的默认值：
 
 ```javascript
-    if (request.method === 'POST' && url.pathname === '/api/review') {
-      const body = await readBody(request);
-      const text = typeof body.text === 'string' ? body.text.trim() : '';
-      if (!text) {
-        sendJson(response, 400, { ok: false, error: 'EMPTY_INPUT', message: '先说点什么。' });
-        return;
-      }
-      const result = await kernel([
-        'review',
-        '--symbol', String(body.symbol ?? ''),
-        '--name', String(body.name ?? ''),
-        '--text', text,
-        '--db', dbPath,
-        '--json',
-      ]);
-      if (result.code !== 0) {
-        sendJson(response, 422, {
-          ok: false,
-          error: 'KERNEL_FAILED',
-          message: (result.stderr || '').slice(-500) || `exit=${result.code}`,
-        });
-        return;
-      }
-      const payload = parseKernelJson(result.stdout);
-      if (!payload) {
-        sendJson(response, 422, { ok: false, error: 'KERNEL_BAD_OUTPUT', message: result.stdout.slice(-300) });
-        return;
-      }
-      sendJson(response, 200, payload);
-      return;
-    }
+/**
+ * 路由处理。
+ *
+ * 依赖全部由调用方显式注入：模块层级上没有任何宿主对象被捕获，
+ * 因此它既能在 start() 里跑，也能在测试里用 fake 依赖跑。
+ */
+export async function handleRoute(request, response, options = {}) {
+  const {
+    context = {},
+    clientEntry = '',
+    readObservations = async () => [],
+    writeObservations = async () => {},
+    parseObservation = async () => ({
+      ok: false,
+      error: 'UNAVAILABLE',
+      message: '解析能力不可用。',
+    }),
+    kernel = runKernel,
+    dbPath = DEFAULT_DB,
+  } = options;
 
-    if (request.method === 'GET' && url.pathname.endsWith('/reviews')) {
-      const id = decodeURIComponent(url.pathname.slice('/api/observations/'.length, -'/reviews'.length));
-      const result = await kernel(['reviews', id, '--db', dbPath, '--json']);
-      const payload = parseKernelJson(result.stdout);
-      sendJson(response, 200, payload ?? { observation_id: id, items: [] });
-      return;
-    }
+  const url = new URL(request.url ?? '/', 'http://miniapp.local');
 
-    if (request.method === 'DELETE' && url.pathname.startsWith('/api/observations/')) {
-      const id = decodeURIComponent(url.pathname.slice('/api/observations/'.length));
-      const result = await kernel(['delete', id, '--db', dbPath, '--json']);
-      if (result.code !== 0) {
-        sendJson(response, 404, { ok: false, error: 'not_found', id });
-        return;
-      }
-      sendJson(response, 200, { ok: true, id });
+  if (request.method === 'GET' && url.pathname === '/dashboard') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(clientEntry);
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/status') {
+    sendJson(response, 200, {
+      ok: true,
+      agent: Boolean(context.agent),
+      capabilities: {
+        agentRun: context.capabilities?.has?.('agent.run') ?? null,
+        speechTranscribe: context.capabilities?.has?.('speech.transcribe') ?? null,
+        tool: context.capabilities?.has?.('tool') ?? null,
+        hostConnector: context.capabilities?.has?.('hostConnector') ?? null,
+      },
+      observationCount: await countObservations(kernel, dbPath, readObservations),
+    });
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/observations') {
+    // 观察库以内核为准（删除也走内核，行 id 必须是内核行 id）
+    const result = await kernel(['list', '--db', dbPath, '--json']);
+    const payload = parseKernelJson(result.stdout);
+    const items = Array.isArray(payload)
+      ? payload
+      : (payload && Array.isArray(payload.items) ? payload.items : []);
+    // 前端读的是 data.items —— 这里必须保持 {ok, items} 外壳
+    sendJson(response, 200, { ok: true, items });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/parse') {
+    const body = await readBody(request);
+    const rawText = typeof body.text === 'string' ? body.text.trim() : '';
+    if (!rawText) {
+      sendJson(response, 400, { ok: false, error: 'EMPTY_INPUT', message: '先说点什么，或直接输入文字。' });
       return;
     }
+    const result = await parseObservation(rawText);
+    sendJson(response, result.ok ? 200 : 422, result);
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/save') {
+    const body = await readBody(request);
+    const draft = body.draft && typeof body.draft === 'object' ? body.draft : null;
+    if (!draft) {
+      sendJson(response, 400, { ok: false, error: 'INVALID_DRAFT', message: '没有可保存的观察卡。' });
+      return;
+    }
+    const items = await readObservations();
+    const record = {
+      id: `obs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      createdAt: new Date().toISOString(),
+      rawText: typeof body.rawText === 'string' ? body.rawText : '',
+      draft: normalizeDraft(draft),
+    };
+    items.push(record);
+    await writeObservations(items);
+    sendJson(response, 200, { ok: true, id: record.id, total: items.length });
+    return;
+  }
+```
+
+紧接着（同一函数内）新增三条路由，放在 `/api/save` 之后、`404` 兜底之前：
+
+```javascript
+  if (request.method === 'POST' && url.pathname === '/api/review') {
+    const body = await readBody(request);
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+    if (!text) {
+      sendJson(response, 400, { ok: false, error: 'EMPTY_INPUT', message: '先说点什么。' });
+      return;
+    }
+    const result = await kernel([
+      'review',
+      '--symbol', String(body.symbol ?? ''),
+      '--name', String(body.name ?? ''),
+      '--text', text,
+      '--db', dbPath,
+      '--json',
+    ]);
+    if (result.code !== 0) {
+      sendJson(response, 422, {
+        ok: false,
+        error: 'KERNEL_FAILED',
+        message: (result.stderr || '').slice(-500) || `exit=${result.code}`,
+      });
+      return;
+    }
+    const payload = parseKernelJson(result.stdout);
+    if (!payload) {
+      sendJson(response, 422, { ok: false, error: 'KERNEL_BAD_OUTPUT', message: result.stdout.slice(-300) });
+      return;
+    }
+    sendJson(response, 200, payload);
+    return;
+  }
+
+  if (request.method === 'GET' && url.pathname.endsWith('/reviews')) {
+    const id = decodeURIComponent(url.pathname.slice('/api/observations/'.length, -'/reviews'.length));
+    const result = await kernel(['reviews', id, '--db', dbPath, '--json']);
+    const payload = parseKernelJson(result.stdout);
+    sendJson(response, 200, payload ?? { observation_id: id, items: [] });
+    return;
+  }
+
+  if (request.method === 'DELETE' && url.pathname.startsWith('/api/observations/')) {
+    const id = decodeURIComponent(url.pathname.slice('/api/observations/'.length));
+    const result = await kernel(['delete', id, '--db', dbPath, '--json']);
+    if (result.code !== 0) {
+      sendJson(response, 404, { ok: false, error: 'not_found', id });
+      return;
+    }
+    sendJson(response, 200, { ok: true, id });
+    return;
+  }
+
+  sendJson(response, 404, { error: 'not_found' });
+}
+```
+
+再在模块层级加一个计数辅助函数（`/api/status` 用；内核不可用时回落到旧 JSON 文件观察库）：
+
+```javascript
+async function countObservations(kernel, dbPath, readObservations) {
+  try {
+    const result = await kernel(['list', '--db', dbPath, '--json']);
+    const payload = parseKernelJson(result.stdout);
+    if (payload && Array.isArray(payload.items)) return payload.items.length;
+  } catch {
+    // 内核不可用：回落到旧 JSON 文件观察库
+  }
+  return (await readObservations()).length;
+}
+```
+
+最后把 `start()` 里的 server 创建改成**显式组装依赖**后调用 `handleRoute`
+（原来的内联 `handle` 闭包已被删除）：
+
+```javascript
+  const server = createServer((request, response) => {
+    void handleRoute(request, response, {
+      context,
+      clientEntry,
+      readObservations,
+      writeObservations,
+      parseObservation,
+      kernel: runKernel,
+      dbPath: DEFAULT_DB,
+    }).catch(() => {
+      if (!response.headersSent) sendJson(response, 500, { error: 'internal_error' });
+    });
+  });
 ```
 
 **路由顺序注意**：`GET /api/observations/:id/reviews` 必须放在通用的 `GET /api/observations` 之前判断，否则会被先匹配掉。
@@ -3967,10 +4560,13 @@ function parseKernelJson(stdout) {
 - [ ] **Step 4: 运行测试确认通过**
 
 ```bash
-node --test miniapps/agaistock/test/
+node --test "miniapps/agaistock/test/*.test.mjs"
 ```
 
-Expected: 全部 PASS —— 既有 `pipeline.test.mjs` 23 条 + 新增 `api.test.mjs` 6 条
+> 注意：`node --test <目录>` 在本机（Node 24 + Windows）会把目录当成模块解析而报
+> `Cannot find module ...\miniapps\agaistock\test`。必须用 glob 形式。
+
+Expected: 全部 PASS —— 既有 `pipeline.test.mjs` 23 条 + 新增 `api.test.mjs` 10 条
 
 - [ ] **Step 5: toolAccess 保持不声明**
 
@@ -4001,18 +4597,31 @@ git commit -m "feat: mini app api for review, reviews and soft delete"
 **Interfaces:**
 - Consumes: Task 14 的 API
 - Produces:
-  - `miniapps/agaistock/miniapp/client/render.mjs` 导出三个纯函数：
+  - `miniapps/agaistock/miniapp/client/render.mjs` 导出四个纯函数：
     - `renderReviews(reviews: Array) -> string` —— 点评师意见区块 HTML
     - `renderScore(score: object) -> string` —— 评分区块 HTML
     - `renderHorizon(plan: object) -> string` —— 观察期区块 HTML
+    - `renderObservationRows(items: Array) -> string` —— 观察库表格行 HTML。
+      入参是**内核行**（`id` / `created_at` / `symbol` / `name` / `direction` / `thesis` / `confidence`），
+      每行带一个 `data-delete-observation="<id>"` 的删除按钮。
   - UI：
     - 解析区新增「清空」按钮
     - 观察卡区下方新增「点评师意见」折叠区
     - 新增「评分」区（五维 + 贡献来源 + `no_reviewer` 明示）
     - 新增「观察期」区
-    - 观察库表格每行新增「删除」按钮
+    - 观察库表格每行新增「删除」按钮（表头加一列「操作」）
+
+**观察库的数据源变了**：Task 14 之后 `/api/observations` 走内核 `list --json`，
+返回的行是**内核行**（`id` / `created_at` / `symbol` / …），不再是旧的
+`{createdAt, draft}` JSON 文件记录。因此表格渲染与删除按钮都必须按内核行来写：
+删除用的 id 是内核行 id（`data-delete-observation`），删除请求打到内核 `delete`。
+旧 JSON 文件观察库（`observations.json`）保留给 `/api/save` 兼容，但不再是列表的数据源。
 
 **加载顺序保证**：`render.mjs` 用 `<script type="module" src="./render.mjs">` 引入。module 脚本是 **deferred** 的，在 DOM 解析完成后、且早于 `DOMContentLoaded` 执行；而 `index.html` 里主 `<script>` 中的保存动作是**用户点击触发的异步流程**，那时 module 必定已加载完毕。因此 `window.agaistockRender` 一定可用。
+
+> `render.mjs` 里**不能**在模块顶层直接写 `window.agaistockRender = …`：
+> Node 没有 `window`，`import` 该模块就会抛 `ReferenceError: window is not defined`，
+> 测试在跑第一条用例之前就全挂。挂载必须放在 `typeof window !== 'undefined'` 保护里。
 
 - [ ] **Step 1: 写失败的前端渲染测试**
 
@@ -4022,7 +4631,7 @@ git commit -m "feat: mini app api for review, reviews and soft delete"
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { renderReviews, renderScore, renderHorizon } from '../miniapp/client/render.mjs';
+import { renderReviews, renderScore, renderHorizon, renderObservationRows } from '../miniapp/client/render.mjs';
 
 const REVIEW = {
   reviewer_id: 'anchor-chanlun',
@@ -4088,6 +4697,32 @@ test('renderHorizon shows tier and review date', () => {
   const html = renderHorizon({ tier: 'short', review_at: '2026-11-27', rationale: '顶背驰', checks: [] });
   assert.match(html, /2026-11-27/);
   assert.match(html, /顶背驰/);
+});
+
+test('renderObservationRows renders kernel observation rows', () => {
+  const html = renderObservationRows([
+    {
+      id: 'obs_1',
+      created_at: '2026-11-24T07:00:00Z',
+      symbol: '002378',
+      name: '章源钨业',
+      direction: 'bullish',
+      thesis: '还能拿半年',
+      confidence: 0.72,
+    },
+  ]);
+  assert.match(html, /002378/);
+  assert.match(html, /章源钨业/);
+  assert.match(html, /还能拿半年/);
+  assert.match(html, /看多/);
+  assert.match(html, /72%/);
+});
+
+test('renderObservationRows puts the kernel row id on the delete button', () => {
+  const html = renderObservationRows([
+    { id: 'obs_1', created_at: '2026-11-24T07:00:00Z', symbol: '002378', thesis: 't' },
+  ]);
+  assert.match(html, /data-delete-observation="obs_1"/);
 });
 ```
 
@@ -4206,8 +4841,46 @@ export function renderHorizon(plan) {
     ${checks ? `<div class="horizon-checks"><h4>到期检查项</h4><ul>${checks}</ul></div>` : ''}`;
 }
 
-// 供 index.html 的主脚本调用（module 脚本是 deferred，用户点击时必定已就绪）
-window.agaistockRender = { renderReviews, renderScore, renderHorizon };
+const DIRECTION_LABEL = { bullish: '看多', bearish: '看空', neutral: '中性' };
+
+/**
+ * 观察库表格行。
+ *
+ * 入参是**内核行**（Task 14 之后 /api/observations 走内核 list --json）：
+ * id / created_at / symbol / name / direction / thesis / confidence。
+ * 删除按钮把内核行 id 放在 data-delete-observation 上，由 index.html 事件委托取出。
+ */
+export function renderObservationRows(items) {
+  if (!Array.isArray(items) || items.length === 0) return '';
+  return items.map(function (item) {
+    const when = item.created_at ? new Date(item.created_at) : null;
+    const timeText = when && !Number.isNaN(when.getTime())
+      ? when.toLocaleString('zh-CN', { hour12: false })
+      : (item.created_at || '');
+    const dir = 'dir-' + (item.direction || 'neutral');
+    const label = DIRECTION_LABEL[item.direction] || item.direction || '中性';
+    const invalidation = Array.isArray(item.invalidation) ? item.invalidation : [];
+    return '<tr>'
+      + '<td class="num">' + escapeHtml(timeText) + '</td>'
+      + '<td class="num">' + escapeHtml((item.symbol || '—') + (item.name ? ' ' + item.name : '')) + '</td>'
+      + '<td>' + escapeHtml(item.thesis || '（未提取）') + '</td>'
+      + '<td><span class="tag ' + dir + '">' + escapeHtml(label) + '</span></td>'
+      + '<td class="num">' + Math.round((item.confidence || 0) * 100) + '%</td>'
+      + '<td>' + (invalidation.length
+          ? escapeHtml(invalidation.join('；'))
+          : '<span style="color:var(--mcode-warning)">缺失</span>') + '</td>'
+      + '<td><button type="button" class="ghost small" data-delete-observation="'
+        + escapeHtml(item.id || '') + '">删除</button></td>'
+      + '</tr>';
+  }).join('');
+}
+
+// 供 index.html 的主脚本调用（module 脚本是 deferred，用户点击时必定已就绪）。
+// Node 里没有 window —— 直接赋值会让 import 该模块的测试在第一条用例前就抛
+// ReferenceError，所以必须先判断。
+if (typeof window !== 'undefined') {
+  window.agaistockRender = { renderReviews, renderScore, renderHorizon, renderObservationRows };
+}
 ```
 
 - [ ] **Step 4: 在 `index.html` 接入**
@@ -4217,7 +4890,11 @@ window.agaistockRender = { renderReviews, renderScore, renderHorizon };
 - `var rawText = document.getElementById('raw-text');`
 - `var cardPanel = document.getElementById('card-panel');`
 - `var obsCount = document.getElementById('obs-count');`
+- `var obsRows = document.getElementById('obs-rows');`
 - `var runtimeState = { speech: null, agent: null, count: 0 };`
+- **草稿变量叫 `currentDraft`（不是 `draft`）** —— 写错名字会直接抛
+  `ReferenceError: draft is not defined`，保存与清空流程整条断掉。
+- localStorage 的 key 是 `'agaistock.draft'`（存的是 `rawText.value`，不是草稿对象）。
 
 (a) 在 `</body>` 之前引入 module：
 
@@ -4245,10 +4922,10 @@ window.agaistockRender = { renderReviews, renderScore, renderHorizon };
 (c) 「存进观察库」按钮的点击处理改为：先 `POST /api/review`，成功后用返回的 `reviews` / `score` / `horizon` 渲染三块区域：
 
 ```javascript
-    // 保存并点评
+    // 保存并点评（草稿变量是 currentDraft）
     var payload = {
-      symbol: (draft && draft.symbol) || '',
-      name: (draft && draft.name) || '',
+      symbol: (currentDraft && currentDraft.symbol) || '',
+      name: (currentDraft && currentDraft.name) || '',
       text: rawText.value
     };
     var resp = await fetch('/api/review', {
@@ -4258,7 +4935,7 @@ window.agaistockRender = { renderReviews, renderScore, renderHorizon };
     });
     var data = await resp.json();
     if (!resp.ok || data.ok === false) {
-      setStatus('点评失败：' + (data.message || data.error || resp.status));
+      setStatus(recordStatus, '点评失败：' + (data.message || data.error || resp.status), 'error');
       return;
     }
     var r = window.agaistockRender;
@@ -4270,17 +4947,58 @@ window.agaistockRender = { renderReviews, renderScore, renderHorizon };
     document.getElementById('horizon-section').hidden = false;
 ```
 
-(d) 观察库表格每行新增删除按钮（沿用现有 `loadObservations()` 的渲染处）：
+> `setStatus` 在现有脚本里的签名是 `setStatus(node, text, tone)`，
+> 要设置状态必须传节点（`recordStatus`），不能只传两个参数。
+
+(d) 观察库表格：**渲染改成内核行**，删除按钮用**内核行 id**。
+
+现有渲染器遍历的是 `items.map(function (item) {…})`，元素形如 `{createdAt, draft}`；
+Task 14 之后 `/api/observations` 返回的是**内核行**（`id` / `created_at` / `symbol` / `name` /
+`direction` / `thesis` / `confidence`），`item.draft` 不存在了。
+所以表格行改由 `render.mjs` 的纯函数渲染（可测），删除按钮的 id 放在
+`data-delete-observation` 上，由 `obsRows` 上的事件委托取出。
+
+先给表头加一列「操作」：
+
+```html
+                <tr>
+                  <th scope="col">时间</th>
+                  <th scope="col">标的</th>
+                  <th scope="col">主张</th>
+                  <th scope="col">方向</th>
+                  <th scope="col">信心</th>
+                  <th scope="col">证伪条件</th>
+                  <th scope="col">操作</th>
+                </tr>
+```
+
+再把 `loadObservations()` 里的 `obsRows.innerHTML = items.map(…)` 换成：
 
 ```javascript
-      var delBtn = document.createElement('button');
-      delBtn.className = 'ghost small';
-      delBtn.textContent = '删除';
-      delBtn.addEventListener('click', async function () {
-        if (!confirm('删除后该观察不再参与评分与校准统计，确定吗？')) return;
-        var res = await fetch('/api/observations/' + encodeURIComponent(row.id), { method: 'DELETE' });
-        if (res.ok) loadObservations();
-      });
+              obsRows.innerHTML = window.agaistockRender.renderObservationRows(items);
+```
+
+删除按钮的事件委托（挂在 `obsRows` 上，行是重绘的，不能把监听器绑在单个按钮上）：
+
+```javascript
+        obsRows.addEventListener('click', function (event) {
+          var button = event.target && event.target.closest
+            ? event.target.closest('[data-delete-observation]')
+            : null;
+          if (!button) return;
+          var id = button.getAttribute('data-delete-observation');
+          if (!id) return;
+          if (!confirm('删除后该观察不再参与评分与校准统计，确定吗？')) return;
+          fetch('/api/observations/' + encodeURIComponent(id), { method: 'DELETE' })
+            .then(function (res) {
+              if (res.ok) {
+                loadObservations();
+              } else {
+                setStatus(recordStatus, '删除失败。', 'error');
+              }
+            })
+            .catch(function () { setStatus(recordStatus, '删除失败。', 'error'); });
+        });
 ```
 
 (e) 解析区新增「清空」按钮（放在「解析成观察卡」旁边）：
@@ -4288,7 +5006,7 @@ window.agaistockRender = { renderReviews, renderScore, renderHorizon };
 ```javascript
     function clearDraft() {
       rawText.value = '';
-      draft = null;
+      currentDraft = null;
       cardPanel.innerHTML = '';
       document.getElementById('reviews-section').hidden = true;
       document.getElementById('score-section').hidden = true;
@@ -4297,15 +5015,16 @@ window.agaistockRender = { renderReviews, renderScore, renderHorizon };
     }
 ```
 
-> 注意：`draft` 变量与 localStorage 的 key 名以现有 `index.html` 的实际写法为准 —— 实现时先读 `index.html` 里的草稿存取代码，沿用同样的 key。
+> 注意：草稿变量是 `currentDraft`，localStorage 的 key 是 `'agaistock.draft'`（存的是 `rawText.value`）。
+> 这两个名字都以现有 `index.html` 的实际写法为准 —— 实现时先读 `index.html` 里的草稿存取代码，沿用同样的 key。
 
 - [ ] **Step 5: 运行测试确认通过**
 
 ```bash
-node --test miniapps/agaistock/test/
+node --test "miniapps/agaistock/test/*.test.mjs"
 ```
 
-Expected: 全部 PASS —— `pipeline.test.mjs` 23 条 + `api.test.mjs` 6 条 + `render.test.mjs` 6 条
+Expected: 全部 PASS —— `pipeline.test.mjs` 23 条 + `api.test.mjs` 10 条 + `render.test.mjs` 8 条
 
 - [ ] **Step 6: Commit**
 
@@ -4352,7 +5071,9 @@ Expected: runtime `running`，open 成功。
 3. 点击「存进观察库」→ 确认：
    - 「点评师意见」区出现 `anchor-chanlun`
    - 至少 1 条 finding，且显示 `dimension` 与 `delta`
-   - 「建议的证伪条件」区块出现且带「采纳」按钮
+   - 「建议的证伪条件」区块：本轮结构识别出了中枢就出现且带「采纳」按钮；
+     若本次结构里没有任何可用中枢（薄结构），该区块可以为空 —— 这时记进实测结论，
+     不要把「没有证伪位」当成 bug（证伪位来自中枢上下沿，没有中枢就没有位）
    - 「判读限制」区块出现 caveats
    - 「评分」区显示总分 + 五维，其中无人点评的维度显示「无人点评」
    - 「观察期」区显示日期与档位
@@ -4377,12 +5098,19 @@ Expected: 观察库与点评结论仍在（持久化跨重启生效）
 - [ ] **Step 5: 跑全量测试**
 
 ```bash
-python -m unittest discover -s tests -v
-node --test miniapps/agaistock/test/
+python -m unittest discover -s tests -t . -v
+node --test "miniapps/agaistock/test/*.test.mjs"
 node tools/check-spec.mjs
+node tools/check-spec.mjs docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md --external docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
 ```
 
-Expected: 全部通过
+Expected: 全部通过。
+
+> `discover` 必须带 `-t .`：少了它，测试模块会以顶层名 `test_registry` 被导入，
+> 而 `tests/test_registry.py` 里的注册表又按 `tests.test_registry` 导入自己，
+> 同一个类被加载两次 → `assertIsInstance` 失败（`test_registry` 2 条）。
+> `node --test` 必须用 glob 形式：目录形式在本机会报
+> `Cannot find module ...\miniapps\agaistock\test`。
 
 - [ ] **Step 6: 把实测结论写回设计文档**
 
@@ -4404,11 +5132,11 @@ git commit -m "docs: record end-to-end verification results for reviewer layer"
 python -m pip install -e .
 
 # Python 单测
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -t . -v
 python -m unittest tests.test_scoring -v
 
 # Node 单测
-node --test miniapps/agaistock/test/
+node --test "miniapps/agaistock/test/*.test.mjs"
 
 # 语法检查
 node --check miniapps/agaistock/miniapp/node/server.mjs
@@ -4416,6 +5144,7 @@ node --check miniapps/agaistock/miniapp/node/server.mjs
 # 文档自检
 node tools/check-spec.mjs
 node tools/check-spec.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md --external docs/superpowers/specs/2026-11-24-stock-review-app-architecture.md
+node tools/check-spec.mjs docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md --external docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
 
 # 端到端
 python -m agaistock.cli review --symbol 002378 --name 章源钨业 --text "还能拿半年"
@@ -4430,7 +5159,7 @@ node tools/probe/run-probe.mjs --symbol 002378 --name 章源钨业 --setcode 0
 
 | 风险 | 对应任务 | 缓解 |
 |---|---|---|
-| 缠论三级别取数耗时（3 次 tdx_kline + 3 次 Python 分析） | Task 13/14/15 | 点评异步执行，UI 显示「点评中」；观察卡先落盘 |
+| 缠论三级别取数耗时（3 次 tdx_kline + 3 次 Python 分析） | Task 13/14/15 | 内核调用带超时（Task 14 `runKernel` 180s，超时按失败返回）；观察卡先落盘，点评失败不影响记录 |
 | 上游缠论脚本与当前 `tdx_kline` 结构不兼容 | Task 6 | 新写适配器，不改上游；Task 6 Step 5 用真实数据验证 |
 | 上游脚本在 Python 3.11 可能有语法/行为差异 | Task 7 | Task 7 Step 6 用真实标的跑通三级别 |
 | LLM 篡改判定字段 | Task 9 | 受保护字段校验，篡改即丢弃 |
