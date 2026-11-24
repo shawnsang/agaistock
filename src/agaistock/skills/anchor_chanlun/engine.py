@@ -39,8 +39,9 @@ def _run_script(script: str, work_dir: Path, extra: list[str]) -> None:
             timeout=SCRIPT_TIMEOUT,
         )
     except subprocess.TimeoutExpired as exc:
-        # 失败契约统一为 RuntimeError —— 调用方按 `except RuntimeError` 捕获即可，
-        # 不必知道超时是 subprocess 的另一类异常。
+        # 脚本执行失败统一为 RuntimeError。**注意**：engine 并不是「只抛 RuntimeError」——
+        # json.JSONDecodeError / OSError 仍可能逃逸，所以下游（Task 10 点评师）必须用
+        # `except Exception` 隔离（与 Task 4 run_one 一致），不能只 catch RuntimeError。
         raise RuntimeError(f"{script} 执行超时(>{SCRIPT_TIMEOUT}s)") from exc
     if result.returncode != 0:
         # 上游脚本只用 print() 报告原因，**不写 stderr** —— 只看 stderr 会得到空消息。

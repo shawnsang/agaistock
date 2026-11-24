@@ -88,8 +88,8 @@ class ChanlunEngineTests(unittest.TestCase):
         self.assertIn("未找到 K 线文件", str(ctx.exception))
 
     def test_run_script_timeout_is_reported_as_runtime_error(self):
-        # 失败契约统一为 RuntimeError：调用方（Task 8/10 的失败隔离）只 catch 一种异常，
-        # 不需要额外知道 subprocess.TimeoutExpired 的存在。
+        # 超时必须转成 RuntimeError：脚本执行失败在本模块统一为 RuntimeError，
+        # 调用方不必知道 subprocess.TimeoutExpired 的存在。
         with mock.patch.object(
             engine.subprocess,
             "run",
