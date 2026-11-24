@@ -3580,6 +3580,18 @@ class WordingTests(unittest.TestCase):
         self.assertEqual(result[0].claim, "原始表述")
         self.assertEqual(result[0].delta, -12)
 
+    def test_unhashable_code_in_the_llm_payload_degrades_to_the_original(self):
+        # 解析段真正会崩的输入：item.get("code") 拿到一个 list 时，
+        # 拿它当 dict 的键 → TypeError: unhashable type: 'list'。
+        # 这一步处理的是不可信外部输入，异常一旦穿透到点评师，
+        # 整轮点评会变成 status="error"，连规则层已经算好的 findings 一起丢掉。
+        # （上面那条非 dict 元素的用例是回归护栏：旧实现下它就已经通过；
+        #   这条才是能证明「解析段兜底」真的生效的探针。）
+        llm = FakeLlm('{"items":[{"code":[],"claim":"改写"}]}')
+        result = wording.phrase([finding()], {"thesis": "t"}, llm=llm)
+        self.assertEqual(result[0].claim, "原始表述")
+        self.assertEqual(result[0].delta, -12)
+
     def test_protected_fields_come_from_the_contract(self):
         # 受保护字段只能有一个来源，否则两处分叉就没人说得清「哪些字段不许 LLM 改」。
         from agaistock.reviewers import contract
@@ -3853,7 +3865,7 @@ def phrase(
 python -m unittest tests.test_wording tests.test_llm_client -v
 ```
 
-Expected: 11 tests PASS
+Expected: 12 tests PASS
 
 - [ ] **Step 6: Commit**
 
