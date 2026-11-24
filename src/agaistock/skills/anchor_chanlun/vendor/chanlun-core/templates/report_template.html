@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="wPrM20detTr4eUKBSDWKn9">
+<head data-page-node-id="pdpeLuNIQLEKn8QHnB9HcK">
+<meta charset="UTF-8" data-page-node-id="NyUF6x1g7Y3XTOHhA2u8pQ">
+<title>300865 大宏立 · 缠论分析报告</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8;
+    color: #1d1d1f;
+    margin: 0; padding: 24px 16px;
+    line-height: 1.6;
+  }
+  .container { max-width: 1240px; margin: 0 auto; }
+  header { background: #fff; padding: 24px 28px; border-radius: 16px;
+    border: 0.5px solid rgba(0,0,0,0.08); margin-bottom: 16px; }
+  header h1 { font-size: 22px; font-weight: 500; margin: 0 0 4px 0; }
+  header .meta { color: #6e6e73; font-size: 13px; margin: 0; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-bottom: 16px; }
+  .card { background: #fff; padding: 18px 20px; border-radius: 12px;
+    border: 0.5px solid rgba(0,0,0,0.08); }
+  .card .label { color: #6e6e73; font-size: 12px; margin-bottom: 4px; }
+  .card .value { font-size: 22px; font-weight: 500; }
+  .card .sub { font-size: 12px; color: #6e6e73; margin-top: 4px; }
+  .card.warn .value { color: #d63333; }
+  .card.good .value { color: #2a7f3f; }
+  .card.info .value { color: #185fa5; }
+  .card.amber .value { color: #b66b16; }
+  section { background: #fff; border-radius: 16px; padding: 22px 26px;
+    border: 0.5px solid rgba(0,0,0,0.08); margin-bottom: 16px; }
+  section h2 { font-size: 16px; font-weight: 500; margin: 0 0 14px 0; }
+  section p { font-size: 13px; color: #1d1d1f; margin: 6px 0; }
+  .muted { color: #6e6e73; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid rgba(0,0,0,0.06); }
+  th { color: #6e6e73; font-weight: 500; font-size: 12px; text-transform: uppercase; }
+  tr:last-child td { border-bottom: none; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+  .tag.up { background: #fadcd6; color: #993c1d; }
+  .tag.down { background: #cee2d5; color: #27500a; }
+  .tag.amber { background: #faecc6; color: #854f0b; }
+  .tag.blue { background: #d3e3f4; color: #185fa5; }
+  .tag.gray { background: #eeede7; color: #5f5e5a; }
+  .key-price { padding: 12px 16px; border-radius: 10px; margin: 8px 0; font-family: ui-monospace, monospace;
+    border-left: 3px solid; background: #fafaf6; }
+  .key-price.support { border-color: #185fa5; }
+  .key-price.resistance { border-color: #993c1d; }
+  .key-price.pivot { border-color: #b66b16; }
+  .key-price .name { font-size: 13px; font-weight: 500; color: #1d1d1f; }
+  .key-price .desc { font-size: 12px; color: #6e6e73; margin-top: 2px; }
+  .strategy { background: #fafaf6; border-left: 3px solid #534ab7; padding: 14px 18px;
+    border-radius: 6px; margin: 10px 0; font-size: 13px; }
+  .strategy strong { color: #534ab7; }
+  .chart-wrap { width: 100%; height: 420px; }
+  .disclaimer { font-size: 12px; color: #6e6e73; padding: 14px 18px; border-radius: 8px;
+    background: #fafaf6; border: 0.5px dashed rgba(0,0,0,0.15); margin-top: 12px; }
+  ul.tight { padding-left: 20px; }
+  ul.tight li { margin: 4px 0; }
+</style>
+</head>
+<body data-page-node-id="rikuhhTEhRSEupC9sSXq2q">
+<div class="container" data-page-node-id="lwGJNUIK7iu9wr9qJGgPqs">
+
+<header data-page-node-id="80YYW64tUzip06NK9rfgOK">
+  <h1 data-page-node-id="wbmIFxqi3yY43894OeRcxs">300865 大宏立 · 缠论分析报告</h1>
+  <p class="meta" data-page-node-id="ANGN3BLgA5D1xQcZ2ymIz1">数据来源：东方财富（前复权） · 行情截至 2026-09-08 收盘 · 仅供技术分析参考，不构成投资建议</p>
+</header>
+
+<div class="grid" data-page-node-id="E0rzXcaWDLMDE4l3qPlO8D">
+  <div class="card" data-page-node-id="V1IpVBx8uP1xBXVxhEHOg5">
+    <div class="label" data-page-node-id="MZGkxEnJGqVX2whl4vzxP0">最新收盘</div>
+    <div class="value" data-page-node-id="FoPJ7bVfUrH4SWLpKFAprR">32.92</div>
+    <div class="sub" data-page-node-id="eZ1MH6jYP8L8vX9Q77GofF">2026-09-08 · -1.44（-4.19%）</div>
+  </div>
+  <div class="card warn" data-page-node-id="PwXa3kBPqR4Lw6I0bP1GEC">
+    <div class="label" data-page-node-id="9zwlDECj9ypab6peJYiqXv">区间涨幅</div>
+    <div class="value" data-page-node-id="xlJbD2LLPUN86xnTNAkxf1">+43.38%</div>
+    <div class="sub" data-page-node-id="n9LSCKW2GQLZDbnES7rAqD">2026-08-07 (22.43) → 2026-09-07 (35.00)</div>
+  </div>
+  <div class="card info" data-page-node-id="UoWLpZ37tmi6GpQpGA6LGO">
+    <div class="label" data-page-node-id="7AE8ox9PwllekBlDl5yGoq">20日均线</div>
+    <div class="value" data-page-node-id="b3meZQCghoQO85EF43E7vD">30.00</div>
+    <div class="sub" data-page-node-id="MNZ4yEfubfK2HBFiGjPJMV">股价站上全部短中期均线</div>
+  </div>
+  <div class="card amber" data-page-node-id="Qwpf0zVxbQ6CEFjKQk4Mum">
+    <div class="label" data-page-node-id="kCVFtMxcdrPw5AFA3cByK3">PE TTM</div>
+    <div class="value" data-page-node-id="PLsWdl2SkQGpmuCU5lxDjB">141.45</div>
+    <div class="sub" data-page-node-id="JmC4KkOtFGvW3U2J4dCBhE">市净率 3.55 · 估值偏高</div>
+  </div>
+  <div class="card good" data-page-node-id="jHjNyfeJ0I2EZsF6YQFGWn">
+    <div class="label" data-page-node-id="IBu1EU2xcLhBprcaNGrYvn">2026H1 业绩</div>
+    <div class="value" data-page-node-id="usIcBD70M0IS01uIiepSvJ">+217%</div>
+    <div class="sub" data-page-node-id="PH3wKEonyVBse8aK4rNbeX">归母净利润 2863 万 · 营收同比+21.8%</div>
+  </div>
+  <div class="card" data-page-node-id="hQsdWOWDqnpCKToZeHOcj1">
+    <div class="label" data-page-node-id="HSx4HiJQnqD23W8W2Noo26">流通市值 / 总市值</div>
+    <div class="value" data-page-node-id="eAIrSO3BH8BS9Iogb0f33L">20.5 / 31.5 亿元</div>
+    <div class="sub" data-page-node-id="2UJWQ0HC8VgfmLMAxX52qZ">流通盘 0.62 亿股 · 小盘股属性</div>
+  </div>
+</div>
+
+<section data-page-node-id="AInDpMm3DEwjPgpjpgaRFG">
+  <h2 data-page-node-id="p88QLVsFZWlMkmRaPHj5BD">1️⃣ K线全景图（含中枢、关键买卖点）</h2>
+  <p class="muted" data-page-node-id="bDNpmJ11ELF2e7j9JVIP8R">叠加缠论结构 — 蓝色矩形为日线中枢、橙色圈为分型、绿色/红色三角为关键买卖点</p>
+  <div class="chart-wrap" data-page-node-id="mbWnmDliBGBzeyrBt9TLjd"><canvas id="priceChart" data-page-node-id="of0ltPlDTRa60sUJMOC4Jz"></canvas></div>
+</section>
+
+<section data-page-node-id="dlgrsDBxBm3zbsqjBLfxER">
+  <h2 data-page-node-id="oG1tDEU1twZOAWswLbE0BP">2️⃣ 走势类型与结构判定（自上而下）</h2>
+  <table data-page-node-id="VNCFrl2LqbpdqD4ovYDnRH">
+    <thead data-page-node-id="x137xiCL7jCzUTG4ueDhV0"><tr data-page-node-id="p51OYAhjWOy10nxH1X2T1P"><th data-page-node-id="mKFImgKcKvlVfOHmNpE3G6">级别</th><th data-page-node-id="LEr5IVAxcdObOSLM0fdQ9B">类型</th><th data-page-node-id="wE3JcBqECqpOKc7d2P4PKK">区间</th><th data-page-node-id="vc11Mg346chpfmTodH47je">区间 / 价格 / 振幅</th><th data-page-node-id="Ov4xxTVbzUg59kDf5DK6IF">结构含义</th></tr></thead>
+    <tbody data-page-node-id="NnJYxIiocSK2h55bqRgpw4">
+      <tr data-page-node-id="HEWLjHjzl8Ih1A4FtRliWw">
+        <td data-page-node-id="KDfq9BfFq60CWl2ZDpiTLx">大级别</td>
+        <td data-page-node-id="DFjdiQlJNBzkgEl3SpCmUH"><span class="tag down" data-page-node-id="bvDgW3KNVP3u1Av3G5G1Hl">下跌段</span></td>
+        <td data-page-node-id="giPmH3EIKOVPXzME5pvV07">2025-07-23 → 2026-03-23</td>
+        <td data-page-node-id="Wenzvi8sBUJHAHO5hRnV1d">52.59 → 17.48（高点不复权前复权差异）→ 盘整</td>
+        <td data-page-node-id="s6siMqFv78v79yE3NkGPkq">2025H2 主跌段，已结束</td>
+      </tr>
+      <tr data-page-node-id="LqUXKEg0rqLXxJd01dYKDz">
+        <td data-page-node-id="qYloYIVGIDDaYn4a4evl0h">中级</td>
+        <td data-page-node-id="qci80wtXeM8CeWeZ40xdZI"><span class="tag up" data-page-node-id="lam1FgobvH1zJASMkWVkh6">上涨段</span></td>
+        <td data-page-node-id="XvZzRZRzXtARKKy337imMT">2026-04-07 → 2026-05-11</td>
+        <td data-page-node-id="yaalKCx6dCBenJidrqHEGz">25.09 → 33.47（<strong data-page-node-id="SbnVKro6tbgoxtxqzljGkx">+33.4%</strong>）</td>
+        <td data-page-node-id="g3lhxDkKvf566Alcs6GVGw">第一波起涨段，伴随成交放大</td>
+      </tr>
+      <tr data-page-node-id="9Uqi6hZZqDhLVaTdCrEATh">
+        <td data-page-node-id="BBoAth8BhKzPk0sG31xvmL">中级</td>
+        <td data-page-node-id="pewBaEsW5th5vgFh0ymsaZ"><span class="tag down" data-page-node-id="bREd04D5ymNtNeHCEdpkgg">下跌段</span></td>
+        <td data-page-node-id="1HmLskHBFymBUTrLh7i70N">2026-06-15 → 2026-07-06</td>
+        <td data-page-node-id="XHlJtVLGO0TjfRu3UF65Hd">26.80 → 21.12（<strong data-page-node-id="CoFBFjMXpRMcinwlUJ1lFR">-21.2%</strong>）</td>
+        <td data-page-node-id="tNimDhN6X2DkUrVuXH4yEX">回踩 + <strong data-page-node-id="ulboG73YeEg4tImVCfqlxF">底背驰</strong>（06-29 MACD 收缩）</td>
+      </tr>
+      <tr data-page-node-id="CAr5ezHX6xEeFAHZ0jCXuF">
+        <td data-page-node-id="yfxxbrjemQoaxGKe8pEPy1">当前</td>
+        <td data-page-node-id="CCrsJAJWnXcVVzWSzAw372"><span class="tag up" data-page-node-id="6pNcFyejqDGUez5KmnC4eS">上涨段（运行中）</span></td>
+        <td data-page-node-id="WMqnGEGIJjborTbDjwzsSE">2026-07-21 → 2026-09-07</td>
+        <td data-page-node-id="El5oyo3Wn60nhUXgAXdBnS">18.89 → 35.00（<strong data-page-node-id="wsw1HQ87QyGEYV43aLp8GX">+85.3%</strong>）</td>
+        <td data-page-node-id="43bDRdJzLlpppcVVDHis0N">主升段，09-07 创短期顶，<strong data-page-node-id="NYyy0UdP3oEDvWfdGalrRh">未见顶背驰</strong></td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section data-page-node-id="5Q48n5QKcQanbFu8jOgD9n">
+  <h2 data-page-node-id="nPpAQ24cz8gvC71PIzhlaO">3️⃣ 中枢识别（核心结构）</h2>
+  <table data-page-node-id="WObn1cMEBmnXCvze2Qk9e6">
+    <thead data-page-node-id="ZRyirV2D3MosHYihzMZkRB"><tr data-page-node-id="Y0tzzvNbhE33ugVAaKuUqO"><th data-page-node-id="yU7gUiotMH16SDnM35tlGN">区间</th><th data-page-node-id="ciusUpQdGvRlFLHv8BJQTi">ZD（下沿）</th><th data-page-node-id="K3kYsTRsiHvqm6ROvWuS7u">ZG（上沿）</th><th data-page-node-id="Yin2oK96D5IB7gAzTIBgKt">区间振幅</th><th data-page-node-id="kEc1OyVltlPMTwqJgsI00k">后续方向</th><th data-page-node-id="qw66FTWnYCYCZJwxhksovT">结构意义</th></tr></thead>
+    <tbody data-page-node-id="tTAEcLL2wzObKHN9kNlft4">
+      <tr data-page-node-id="wRx8GHEPRyPU8DMuZPZiPT">
+        <td data-page-node-id="Pyog0kOFPdwUlFRT3RNXTw">2025-12-17 → 2026-05-29</td>
+        <td data-page-node-id="3hGjPfJvcPo2SOzx9IFTDw"><strong data-page-node-id="UeZiofiy05rJWa7gztnHzB">25.09</strong></td>
+        <td data-page-node-id="2UFbK8onoi7gwjPiOUX3iY"><strong data-page-node-id="0SvIdr5HWVRuKwbetKX1HT">30.00</strong></td>
+        <td data-page-node-id="pvg4FrqqyEzbGg4kYbtakn">19.6%</td>
+        <td data-page-node-id="v8F1Hze4DnAGhhBe0Bh4Ev"><span class="tag up" data-page-node-id="gkNG20RT9D0ApgcaZkBC3P">向上突破</span></td>
+        <td data-page-node-id="YTalJMMOpgIR1qfO1Rg8xN">日线大级别中枢，主力建仓区间</td>
+      </tr>
+      <tr data-page-node-id="9zz53rgj2jBJsEFRpSYcsm">
+        <td data-page-node-id="DervFIMahNf5idzVhg7Zyw">2026-03-11 → 2026-07-06</td>
+        <td data-page-node-id="c4ukeLSCtUSDySWFFPHiyp"><strong data-page-node-id="KgMvq8ZNUEFgAppZI4ANFG">25.09</strong></td>
+        <td data-page-node-id="n5veonTyNnvYa5XFyHHUiK"><strong data-page-node-id="V3fpmNiMwGo4fa5W4SjpBc">26.80</strong></td>
+        <td data-page-node-id="RQWK9ZLXCvjqbv6hNWC4mO">6.8%</td>
+        <td data-page-node-id="k2doDkQnWH2LqK81G1yJfc"><span class="tag down" data-page-node-id="EQ7G3Kg8Hb1EwIO3AQxHZU">向下</span></td>
+        <td data-page-node-id="cIUMPuAxWU8KGkOVyXlUwG">次级别中枢，二次洗盘低点</td>
+      </tr>
+      <tr data-page-node-id="BgFSmLA2kFUUpww3CX1YGo">
+        <td data-page-node-id="3wEqultsNtURwqd2TuIMgD">2026-06-15 → 当前（形成中）</td>
+        <td data-page-node-id="tylSBNJiFKHJTSbocFEPeu">21.12</td>
+        <td data-page-node-id="yvGwRInfuESm9u4V9rwwTY">26.80</td>
+        <td data-page-node-id="6gaHc0Nrlz6MD7sfenZnSR">~27%</td>
+        <td data-page-node-id="i8dnEl7nValMRpCXSR6VQH"><span class="tag amber" data-page-node-id="G7QTdJVbIDHi6zxwhdDbiM">运行中</span></td>
+        <td data-page-node-id="LwvMoezxyKQK9QeV7CafRr">最近一笔大中枢，可能正在形成</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section data-page-node-id="Bb56VzqldXskiQTqldgvAT">
+  <h2 data-page-node-id="SMwfXd3A0EC2EDCW4sdwVU">4️⃣ 背驰信号（与 MACD 联合判定）</h2>
+  <table data-page-node-id="tMiedVwkrqTCOGCmk5K830">
+    <thead data-page-node-id="7xNiqtljxhhNA471cUlLpE"><tr data-page-node-id="AqP1JAiwQvZGWn956GpTfQ"><th data-page-node-id="0dSDlHvtw8nS3Y9IIrqVgF">日期</th><th data-page-node-id="phjGQ6z2QpNmCQJlHApOUF">类型</th><th data-page-node-id="kUCyrAPBHaWfb44yszxAbE">价格</th><th data-page-node-id="DsIUVIZllDY2c0jnXLXEsD">前段对比</th><th data-page-node-id="n7exAEZmwz552LKgQJEbJ9">MACD</th><th data-page-node-id="ZOlGlLEXB4BEKasBKAC93p">判定</th><th data-page-node-id="aFE5g0Pzo2kkYWnbEp2snI">后续走势</th></tr></thead>
+    <tbody data-page-node-id="UkA67JDk2OuSnimlfkOJnh">
+      <tr data-page-node-id="dmFglGYUOe6yGRxjBdGxPE">
+        <td data-page-node-id="Blcm3b7nEezbYUC1mNJXAw">2026-01-28</td>
+        <td data-page-node-id="k5cABHuaDRkJ0D7NYB5mhe"><span class="tag down" data-page-node-id="CGPdmoCyalN2c3PWX1w4QQ">顶背驰</span></td>
+        <td data-page-node-id="u8pCgxrC7JH0tJ4hFIvUnq">31.21</td>
+        <td data-page-node-id="KPaq3OUmpgfSeKEHdVfzY5">29.87（前高）</td>
+        <td data-page-node-id="z94fLvBgEGlHoHHA9v8Yvm">0.35 / -0.43</td>
+        <td data-page-node-id="aSV8Ynj83nSovw1tc3umPg">✅ 成立</td>
+        <td data-page-node-id="wYUuNIAG309KySsquMfZd1">价格新高但红柱缩短</td>
+      </tr>
+      <tr data-page-node-id="edDJKAsZkwW9n0gD3nC0wb">
+        <td data-page-node-id="dK2rvCsz8dnHBfG6HFJ7xF">2026-05-11</td>
+        <td data-page-node-id="TEHFhweMr3uya8qAs79EWa"><span class="tag gray" data-page-node-id="3sz0E4BRVbrTMf1ZLVAuE9">无顶背驰</span></td>
+        <td data-page-node-id="UBXOBxmQrC7yRPC84Fmg3c">33.47</td>
+        <td data-page-node-id="aecyjVBC003KAgWVYZHcAq">27.15</td>
+        <td data-page-node-id="XvYUKJWezhXBrjGmKODE6i">0.89 / -0.24</td>
+        <td data-page-node-id="kl4x8jFuFvJ5DnlUEO9w5G">⛔ 仍是趋势延伸</td>
+        <td data-page-node-id="R8tX7Ajf9kLtQn7BmD5D38">继续上涨至 33.47</td>
+      </tr>
+      <tr data-page-node-id="Wpy3Hz96eBEu479C03okIM">
+        <td data-page-node-id="xI7bHmasFLPuOaNp7lOwEl">2026-06-29</td>
+        <td data-page-node-id="qZhb6VLuiW6JiHMEGSgQXt"><span class="tag up" data-page-node-id="TZalyiEBtIvXYNm7lTD0BP">底背驰</span></td>
+        <td data-page-node-id="LfK2RFoRHP6SvmcGTIqY2R">21.12</td>
+        <td data-page-node-id="mTTvczJlOGHvxDH0WlvJ3M">27.02（前低）</td>
+        <td data-page-node-id="YXx2NdFX6hHbGFQncLWLyR">-0.46 / -1.11</td>
+        <td data-page-node-id="GQx77JL51xFB7prMNpPKtE">✅ 成立</td>
+        <td data-page-node-id="tqEC4zeTYOIUY4PhAqixXA">价格新低但绿柱缩短</td>
+      </tr>
+      <tr data-page-node-id="VDGVLxwwAvqrdeLneyeEJi">
+        <td data-page-node-id="TBxACTQX34bhso3IEErjUe">2026-07-21</td>
+        <td data-page-node-id="E8m2EV9v00len3AjIlEBSC"><span class="tag up" data-page-node-id="RUw4fQBeWZO8zNRi5KjcdF">底背驰（二次）</span></td>
+        <td data-page-node-id="GOia34YE51NaYxjIE61Svm">18.89</td>
+        <td data-page-node-id="hrm9LV4oE2cWjho9Fb5AA8">21.12</td>
+        <td data-page-node-id="0UNqeYMVzAxsTUAlBBZ3jn">-0.09 / -0.46</td>
+        <td data-page-node-id="ibgsO5WDuShupEjdDAW8pO">✅ 成立</td>
+        <td data-page-node-id="FK0LSlthBRyHEJD7AUBu89">极强买点位置</td>
+      </tr>
+      <tr data-page-node-id="UObZzZNQdFpsFRTDydHodb">
+        <td data-page-node-id="KlwflvBFmqvODFAmydCTNf">2026-09-07</td>
+        <td data-page-node-id="l53D6ifqoSjZtcyyb6m3hx"><span class="tag gray" data-page-node-id="52iJsQbvs65wWqFvUDoYkS">无顶背驰</span></td>
+        <td data-page-node-id="GdgtWBU1eKP29iQQryRmra"><strong data-page-node-id="pZTpmQ4k1soInlzXImycil">35.00</strong></td>
+        <td data-page-node-id="LXRkXcp5ysEYI7zoZdVFGs">25.35</td>
+        <td data-page-node-id="ZgKuvJdvwGnvHSOOW8YCu3">0.62 / 0.41</td>
+        <td data-page-node-id="vfqGc4xRIMLBhzGbVKvv0h">⛔ 尚未见顶</td>
+        <td data-page-node-id="tVu0wD0XF5POFJxiCwUHTU">当前观察重点</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="muted" data-page-node-id="KpCxY0DWqzUumbSv9yEYGu">判断要义：背驰 = 价格创新高/新低，但同向动能（MACD 柱）未同步放大。<strong data-page-node-id="2BDacEKTyGZAUTb0pSgAb4">当前 09-07 高点 MACD 红柱 0.62 &gt; 前段 0.41 → 没有顶背驰</strong>，但日线红柱已从 0.95（09-04）收窄到 0.62（09-07），需密切关注是否在调整中形成 1卖。</p>
+</section>
+
+<section data-page-node-id="ekAVjdttgH1cFh2oMG19Ip">
+  <h2 data-page-node-id="8KhH7pnMhAJfJpHO3HpsTa">5️⃣ 关键价位（缠论视角 + 传统技术）</h2>
+  <div class="key-price resistance" data-page-node-id="yBWan2px9siAgx9WS2MZ9q">
+    <div class="name" data-page-node-id="tF96syr7FffanpZmfGJUv0">阻力 1：35.00 元（近期顶 / 09-07 最高）</div>
+    <div class="desc" data-page-node-id="FZqAvl4hDsgpRmiHJFj6GI">突破则向上看 36.47（BOLL 上轨）；不突破则可能形成短期顶分型</div>
+  </div>
+  <div class="key-price resistance" data-page-node-id="llLxoKrpCD0EP66hLBq8lM">
+    <div class="name" data-page-node-id="kv82eRbPVkeCZrBiGGF3Pf">阻力 2：36.47 元（BOLL 上轨 + 20 日高点）</div>
+    <div class="desc" data-page-node-id="cUehLcVSfChfpIjqImA32e">本轮上涨通道极限位；如果 1卖成立，可能成为阶段性顶部</div>
+  </div>
+  <div class="key-price pivot" data-page-node-id="5hN6n5jjkQcLahm7Z72wxl">
+    <div class="name" data-page-node-id="nnxsgYqAhxOp60pZ8e3qcU">中枢上沿：30.00 元（20 日均线 / 中枢 ZG）</div>
+    <div class="desc" data-page-node-id="a6AakyAgxGQJTCjbQm6ooG">若回踩在此企稳 → 主升浪健康；若跌破则进入中枢形成阶段</div>
+  </div>
+  <div class="key-price pivot" data-page-node-id="q8qb9C7bqFuEfkFD5Uxcon">
+    <div class="name" data-page-node-id="MM77nxwfjxFw0Gqkns9j75">中枢核心：27.46 元（中枢 ZD）</div>
+    <div class="desc" data-page-node-id="tIYfAE8UI1HXFTqkbx48EL">这是 25.09 - 30.00 中枢的下沿，强支撑；若到此处形成 2买机会</div>
+  </div>
+  <div class="key-price support" data-page-node-id="ZOKNKri07WcD2q3LJwOyb1">
+    <div class="name" data-page-node-id="IdrwYASMFqfPNVU5HBB8mh">强支撑：21.12 - 18.89 元（2026-06 至 2026-07 底背驰区）</div>
+    <div class="desc" data-page-node-id="MnLmSrRbPQb3fp5d6hGiiT">两次底背驰确认的底部区间，下一次回踩若到此处可考虑重仓介入</div>
+  </div>
+  <div class="key-price support" data-page-node-id="DKMsaqdm0wEXV5GrCPUk15">
+    <div class="name" data-page-node-id="QakKpNQWGr6wgExNQpGrD7">极强支撑：17.48 元（2025-04-09 历史大底 / 52 周最低）</div>
+    <div class="desc" data-page-node-id="x4fECDao0dEfOTgi2Qp7w8">仅在极端系统性风险下才可能触及</div>
+  </div>
+</section>
+
+<section data-page-node-id="OLJ1qM9nAo28wnZrtFe2Pa">
+  <h2 data-page-node-id="2SNTPzs20phFTHynUG0cap">6️⃣ 未来一周走势预判（2026-09-09 ~ 2026-09-15）</h2>
+  <p data-page-node-id="jNjbhvr7TcRdy7FP7wU4gD">在缠论视角下，当前处于<strong data-page-node-id="sGgyvHXQaA2KHFOZEGo9hY">"上涨段内部的中继或转折观察期"</strong>。09-08 的大阴线（-4.19%，放量 6.59 万手）打破了 8 月以来的单边上涨节奏。</p>
+
+  <table data-page-node-id="4eYJqwBfFNubNvDRauEDWe">
+    <thead data-page-node-id="pCeCigkBWSqBabSv5uvzGQ"><tr data-page-node-id="Z6xJ45jyqAmJdu9owHoUXs"><th data-page-node-id="xrUAX5ZiHfPVwqdp68wZHg">情景</th><th data-page-node-id="NnYMvhcC80Q3mtgwkvqeeT">触发条件</th><th data-page-node-id="1srXsBgwcFoW97soa0f1dS">预判路径</th><th data-page-node-id="QYQCkjmp2zuoBZnaXadwYf">概率</th></tr></thead>
+    <tbody data-page-node-id="snbpkflkFwoyDlp9Tt67lV">
+      <tr data-page-node-id="LHAh6GOIGyaWppZexG7kTT">
+        <td data-page-node-id="4vli1HO3NvAQL2r08MVguS"><strong data-page-node-id="yPkUijYJlmbJFKY4F3CSO9">情景 A：强势续涨</strong></td>
+        <td data-page-node-id="lfDTVOVurkiZLllDJgeOGI">09-09 起两日内收复 34.50，且成交量维持 6 万手以上</td>
+        <td data-page-node-id="bhDZ8lVTbZkzYh6fv4bmDi">回踩 33.46（5 日线）→ 反弹 → 挑战 35 → 36.47 BOLL 上轨</td>
+        <td data-page-node-id="VRBdVYBlQ7nFROvj7QFPtX">约 35%</td>
+      </tr>
+      <tr data-page-node-id="dE8TrkFJHD4Y82pwM9NDdl">
+        <td data-page-node-id="QgxnKf6T4wbUhKd8o26tLS"><strong data-page-node-id="d8Skpzp2RvwgtlMGzMMW0E">情景 B：高位震荡</strong></td>
+        <td data-page-node-id="mHBHwQbYXVWO1gLgJaN8eO">09-08 大阴后横盘 2-3 天不破 32.50</td>
+        <td data-page-node-id="B3KeOTzh7a1eZ1GoFnTmEb">30.00 ~ 34.50 区间盘整 5-7 个交易日，形成新的日线中枢雏形</td>
+        <td data-page-node-id="Sicf2tcYHxq1krfpote1Co">约 40%</td>
+      </tr>
+      <tr data-page-node-id="4zBj3bb4lA35F4VHoV8att">
+        <td data-page-node-id="zI9yUm1FVA3KJb6kCmiIrw"><strong data-page-node-id="ub4kejCTKQP1T6YneT8tYR">情景 C：深度回调</strong></td>
+        <td data-page-node-id="Nlen7N7kOSTMfZGqErWBcj">跌破 30.00（中枢上沿 + 20 日均线）</td>
+        <td data-page-node-id="3TjUBrxedqCBLeLBIyUO4W">回踩 27.46（中枢下沿）→ 若伴随 MACD 绿柱放大则为 1卖成立</td>
+        <td data-page-node-id="RpbDMVo6EixDZpV2c9UnDJ">约 20%</td>
+      </tr>
+      <tr data-page-node-id="E3O862KkaL1x5NR4ULIdDY">
+        <td data-page-node-id="nMrD0GDZRKM86XEafHGkD7"><strong data-page-node-id="o3HxLJUoHAOfUUTvCwKhce">情景 D：极端破位</strong></td>
+        <td data-page-node-id="1X8r1qhVpd1eoc7eaMm3tT">跌破 25.00 且日 K 连续走弱</td>
+        <td data-page-node-id="MHSRvXWvTFKOiBB7IaAQqG">21 - 18.89 区间寻找二次底背驰，约 1-2 周内完成</td>
+        <td data-page-node-id="vBYzJU51wTRWl3wh9dVIHq">约 5%</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="muted" data-page-node-id="FcXiWGE1I0hjeyGHYJzaj4">综合判断：基准情景为 B（高位震荡，40% 概率），结合 09-08 大阴线但当日 MACD 红柱仅 0.33（低于前日），即使再跌 1-2 天也不会直接破位。向上驱动仍在（9 月 H1 业绩 +217%、战略转型获官方调研背书），向下则要看 30 元支撑是否成立。</p>
+</section>
+
+<section data-page-node-id="ZAdkIGCgDjAqISRxB0EFuf">
+  <h2 data-page-node-id="o0OulxC1sxZNsrj2yq42QN">7️⃣ 投资策略（条件式）</h2>
+
+  <div class="strategy" data-page-node-id="N1gqj6j3UgWQmIS53LXV8q">
+    <strong data-page-node-id="pXZSeiDMaSxm5S73yIPdaO">① 已持仓者</strong>：当前价位 32.92 处于关键位置。<br data-page-node-id="5c3poMIysTIbJQCnJhP1EL">
+    → 若你成本在 <strong data-page-node-id="r6ihk2TZnHcqT3PinHP23e">22 元以下</strong>（约 18.89-21.12 双底区域）：
+    <span class="tag up" data-page-node-id="Is47m1qzcUn6PW9g4oHBKD">持股待涨</span>，至少等到 35.00 突破后再说；
+    <span class="tag up" data-page-node-id="sb6MTu2jE0S2WsOYOFutm6">止损位 26.80</span>（跌破说明走势可能进入更大中枢）。<br data-page-node-id="GWgf1outQGwXjU9J1QQ66U">
+    → 若你成本在 <strong data-page-node-id="BaGlUffUPotwngMS02BZvU">25 - 28 元</strong>（中枢下沿区域）：
+    建议保留 60-70% 仓位，等待 30 元确认站稳后再加仓；<span class="tag amber" data-page-node-id="Hy2Fi9Yk2iWLrrldN1EECi">止损 25.09</span>（跌破则背驰底背驰区被破）。<br data-page-node-id="mPEE7OI4AjmTil4DTmk1iF">
+    → 若你成本在 <strong data-page-node-id="uVpkZpBFq5uC62pxDAvaDk">30 元以上</strong>（最近一周追高）：
+    建议至少减仓 1/3，锁住部分浮盈；剩余仓位以 30 元为止损依据，破则清仓。
+  </div>
+
+  <div class="strategy" data-page-node-id="fx9Sd49GAXVLoDLzIgG33P">
+    <strong data-page-node-id="FfI3rBy1kfqdyvWZw5CE3F">② 空仓者</strong>：建议不追高，等待以下三类机会：<br data-page-node-id="sEePjtpCCaIrW4aYtzZpvj">
+    <strong data-page-node-id="BkMBBRii7jqqkRmSlQ80Pw">3 买机会</strong>：股价放量突破 <strong data-page-node-id="Z9EHHIllYcAlsTPC8km2nI">35.00</strong> 后回踩 33.00 - 34.00 不破 → 可介入 30% 仓位，
+    止损 31.50（约 5 日均线下方）。<br data-page-node-id="gCQY9ZX31BLbF4kH7bDLTF">
+    <strong data-page-node-id="LPDXss9nD3S0FFGc24Bn8S">2 买机会</strong>：回调至 <strong data-page-node-id="CjbkvSaRva0CZPpnufzeFp">28 - 30 元</strong>（中枢 ZG 附近）出现底分型 + 缩量 → 可介入 40% 仓位，
+    止损 27.46。<br data-page-node-id="F4qHsGA9r9A0dfSfQ8fe6V">
+    <strong data-page-node-id="xNTGTZmpiSTMmsmGIzPeJ0">1 买机会（极端）</strong>：大盘或板块系统性杀跌，跌回 21 元附近 → 控仓介入 20%，但需基本面逻辑（业绩、订单）支撑。
+  </div>
+
+  <div class="strategy" data-page-node-id="oHQ1FzRhHTGOO1UOC4KhHu">
+    <strong data-page-node-id="4QOWWJOB08yYNaASj43PCA">③ 仓位管理</strong>：<br data-page-node-id="wUHyG7gZUpBhbG153wE0g0">
+    - 单只个股占总仓位 <span class="tag blue" data-page-node-id="vfgJrYsUB4FC0FmxFVVZEC">不超过 30%</span>（小盘股波动大）；<br data-page-node-id="4NR3BkUsfxPjqBAalCHN6r">
+    - 加仓节奏：3 买 / 2 买分批，每次不超过 1/3 计划仓位；<br data-page-node-id="tpvENDnNA3R4fv6dHSGrwE">
+    - 不在 <strong data-page-node-id="UzflENfIAPPFYYJMLqmHXM">高位放量长阴次日</strong>接飞刀（如 09-08 这种），等至少 2-3 个交易日确认走向。
+  </div>
+
+  <div class="strategy" data-page-node-id="J5xCgXmTgKXoEOpjSTEGkx">
+    <strong data-page-node-id="nCJmHwHqfWSQwqUbHkPVkZ">④ 时间周期配合</strong>：<br data-page-node-id="xAjSuK0aJ8c2si4I4CvNIp">
+    - 一周内（09-09 至 09-15）：看 32.50 和 30 元两个关键位争夺；<br data-page-node-id="czW6MCbIvfGs0QEFSfuK3g">
+    - 中线（一个月）：看 09-08 是否形成顶分型，向下若破 25 元才结束本轮主升；<br data-page-node-id="BkqvPXSPPeRuWYpv658hK8">
+    - 长线（季度）：2026 年内仍有 27.46 - 36 元中线区间的反复机会，结构未坏之前不轻易看空。
+  </div>
+</section>
+
+<section data-page-node-id="onDpWVMbYlC1kV96bcYlDj">
+  <h2 data-page-node-id="EZ92ULzbWnFK6lLcSl8Cxs">8️⃣ 缠论结构小结（一句话）</h2>
+  <p data-page-node-id="QJ2K4fB5mTUw0jBWHfEEgu">
+    <strong data-page-node-id="Hzy863CaDZEOD7RBY25TSl">大宏立（300865）当前处于"上涨段即将进入中枢形成阶段"的关键观察期。</strong>
+  </p>
+  <p data-page-node-id="FmOy2HynFcRaMd8xvDtulN">
+    从 18.89 起的这段上涨中未见顶背驰，红柱动能仍在但已经收窄；
+    日线的中枢雏形在 30-35 元区间正在构筑。09-08 的大阴线是一个分型级别预警但尚未升级为趋势反转。
+  </p>
+  <p data-page-node-id="UhnGyQtkBVet3Auu6EPTBn">
+    操作上<strong data-page-node-id="slYqT7CxHDHm9pLaGqwNDx">短期不建议追高</strong>，耐心等待 3 买或 2 买的低风险介入点；
+    中线持有者以 <span class="tag blue" data-page-node-id="m0ciwPTEdSyQaX9SMaQQZq">30 元</span> 为分水岭，破位减仓，站稳续持。
+  </p>
+  <p class="muted" data-page-node-id="bWkES3ijzEwJD8o3YyJaYy">⚠️ 以上分析仅基于历史 K 线结构 + MACD 量化，不考虑突发消息（如监管、订单、汇率）影响。
+  基本面看，公司 2026H1 业绩 +217% 是真实的积极变化，但 PE TTM 141× 估值已经反映了相当乐观的预期。</p>
+</section>
+
+<div class="disclaimer" data-page-node-id="t2f03DzBTcbeg1NeR4yVAo">
+  <strong data-page-node-id="YxtxuSvAVbYgBnk84ewlhu">⚠️ 免责声明</strong>：以上内容基于公开数据和量化技术分析，仅供参考，不构成投资建议。
+  市场有风险，投资需谨慎。任何投资决策应结合个人风险承受能力、资金状况和投资目标独立判断，
+  必要时咨询持牌专业机构。过往表现不预示未来收益。
+</div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const KLINE = [{d:"2026-01-05",o:27.26,c:27.69,h:27.7,l:27.12,v:12517.0},{d:"2026-01-06",o:27.69,c:27.78,h:28.06,l:27.62,v:12798.0},{d:"2026-01-07",o:27.78,c:27.67,h:27.87,l:27.33,v:10995.0},{d:"2026-01-08",o:27.64,c:28.24,h:28.47,l:27.58,v:17844.0},{d:"2026-01-09",o:28.22,c:28.37,h:28.46,l:28.04,v:13124.0},{d:"2026-01-12",o:28.45,c:28.92,h:28.98,l:28.27,v:18034.0},{d:"2026-01-13",o:28.92,c:28.58,h:29.11,l:28.48,v:15840.0},{d:"2026-01-14",o:28.48,c:28.52,h:29.07,l:28.12,v:18978.0},{d:"2026-01-15",o:28.64,c:28.78,h:28.82,l:28.31,v:13572.0},{d:"2026-01-16",o:28.87,c:29.14,h:29.27,l:28.68,v:16708.0},{d:"2026-01-19",o:29.64,c:29.32,h:29.64,l:28.98,v:13932.0},{d:"2026-01-20",o:29.42,c:29.13,h:29.77,l:28.83,v:15838.0},{d:"2026-01-21",o:29.09,c:29.41,h:29.47,l:28.45,v:13947.0},{d:"2026-01-22",o:29.52,c:29.83,h:29.94,l:29.38,v:12235.0},{d:"2026-01-23",o:29.8,c:29.73,h:29.96,l:29.45,v:10799.0},{d:"2026-01-26",o:29.75,c:29.7,h:30.14,l:29.32,v:17696.0},{d:"2026-01-27",o:29.47,c:29.5,h:29.69,l:28.61,v:15228.0},{d:"2026-01-28",o:29.32,c:30.46,h:31.21,l:28.91,v:52921.0},{d:"2026-01-29",o:30.42,c:28.87,h:30.42,l:28.75,v:37938.0},{d:"2026-01-30",o:28.65,c:29.05,h:29.12,l:28.27,v:20560.0},{d:"2026-02-02",o:28.47,c:28.47,h:29.46,l:28.47,v:15728.0},{d:"2026-02-03",o:28.61,c:29.23,h:29.25,l:28.48,v:14118.0},{d:"2026-02-04",o:29.37,c:29.49,h:29.8,l:29.12,v:17350.0},{d:"2026-02-05",o:29.3,c:29.08,h:29.61,l:29.08,v:9543.0},{d:"2026-02-06",o:28.97,c:29.37,h:29.7,l:28.78,v:11952.0},{d:"2026-02-09",o:29.79,c:30.15,h:30.17,l:29.45,v:13517.0},{d:"2026-02-10",o:30.53,c:29.97,h:30.53,l:29.87,v:10352.0},{d:"2026-02-11",o:29.95,c:30.04,h:30.28,l:29.74,v:7319.0},{d:"2026-02-12",o:30.19,c:29.67,h:30.46,l:29.67,v:8961.0},{d:"2026-02-13",o:29.67,c:29.65,h:30.07,l:29.63,v:8902.0},{d:"2026-02-24",o:29.94,c:30.31,h:30.35,l:29.83,v:13144.0},{d:"2026-02-25",o:30.43,c:30.12,h:30.43,l:30.07,v:9723.0},{d:"2026-02-26",o:30.22,c:29.99,h:30.32,l:29.85,v:9838.0},{d:"2026-02-27",o:29.82,c:30.23,h:30.3,l:29.82,v:11301.0},{d:"2026-03-02",o:29.86,c:28.97,h:30.02,l:28.77,v:16490.0},{d:"2026-03-03",o:29.03,c:28.07,h:29.65,l:27.97,v:15988.0},{d:"2026-03-04",o:27.64,c:27.89,h:28.21,l:27.46,v:11089.0},{d:"2026-03-05",o:28.38,c:28.01,h:28.65,l:27.86,v:11757.0},{d:"2026-03-06",o:27.84,c:29.06,h:29.12,l:27.62,v:13009.0},{d:"2026-03-09",o:28.77,c:28.78,h:29.14,l:28.35,v:12701.0},{d:"2026-03-10",o:29.07,c:29.69,h:29.75,l:28.95,v:10763.0},{d:"2026-03-11",o:29.74,c:29.56,h:29.97,l:29.38,v:9802.0},{d:"2026-03-12",o:29.58,c:28.73,h:29.58,l:28.67,v:11602.0},{d:"2026-03-13",o:28.73,c:28.39,h:29.27,l:28.34,v:8798.0},{d:"2026-03-16",o:28.53,c:28.45,h:28.88,l:28.17,v:10942.0},{d:"2026-03-17",o:28.62,c:27.57,h:28.9,l:27.48,v:11121.0},{d:"2026-03-18",o:27.75,c:28.2,h:28.2,l:27.41,v:9826.0},{d:"2026-03-19",o:28.04,c:27.13,h:28.13,l:27.01,v:9296.0},{d:"2026-03-20",o:27.13,c:26.09,h:27.62,l:25.97,v:13071.0},{d:"2026-03-23",o:25.6,c:24.3,h:25.66,l:23.9,v:19961.0},{d:"2026-03-24",o:25.02,c:25.77,h:25.9,l:24.41,v:20092.0},{d:"2026-03-25",o:26.09,c:26.38,h:26.62,l:25.87,v:9850.0},{d:"2026-03-26",o:26.37,c:25.52,h:26.59,l:25.37,v:9328.0},{d:"2026-03-27",o:25.27,c:26.09,h:26.27,l:25.14,v:8051.0},{d:"2026-03-30",o:25.89,c:26.31,h:26.31,l:25.57,v:9462.0},{d:"2026-03-31",o:26.54,c:26.12,h:27.15,l:26.04,v:13440.0},{d:"2026-04-01",o:26.88,c:26.51,h:26.97,l:26.15,v:9762.0},{d:"2026-04-02",o:26.47,c:26.14,h:26.78,l:25.93,v:9317.0},{d:"2026-04-03",o:26.37,c:25.4,h:26.38,l:25.14,v:7460.0},{d:"2026-04-07",o:25.52,c:26.03,h:26.13,l:25.09,v:8584.0},{d:"2026-04-08",o:26.5,c:26.96,h:26.97,l:26.49,v:10918.0},{d:"2026-04-09",o:26.96,c:26.23,h:26.96,l:26.11,v:7791.0},{d:"2026-04-10",o:26.55,c:26.68,h:27.05,l:26.43,v:8186.0},{d:"2026-04-13",o:26.9,c:26.52,h:26.9,l:26.33,v:7596.0},{d:"2026-04-14",o:26.68,c:26.6,h:26.9,l:26.33,v:5759.0},{d:"2026-04-15",o:26.69,c:26.54,h:26.99,l:26.39,v:7612.0},{d:"2026-04-16",o:26.53,c:27.24,h:27.31,l:26.47,v:10949.0},{d:"2026-04-17",o:27.24,c:27.74,h:27.96,l:27.13,v:15786.0},{d:"2026-04-20",o:27.71,c:27.5,h:27.96,l:27.42,v:19475.0},{d:"2026-04-21",o:27.5,c:27.72,h:28.06,l:27.32,v:14828.0},{d:"2026-04-22",o:28.02,c:27.72,h:28.02,l:27.47,v:11856.0},{d:"2026-04-23",o:29.09,c:29.8,h:32.68,l:29.09,v:79450.0},{d:"2026-04-24",o:29.73,c:30.66,h:31.47,l:29.07,v:85065.0},{d:"2026-04-27",o:30.17,c:31.88,h:31.97,l:29.98,v:83731.0},{d:"2026-04-28",o:31.3,c:30.26,h:31.43,l:30.17,v:55643.0},{d:"2026-04-29",o:30.0,c:30.56,h:31.47,l:29.69,v:44746.0},{d:"2026-04-30",o:30.47,c:30.41,h:30.65,l:30.13,v:33333.0},{d:"2026-05-06",o:30.75,c:30.96,h:31.3,l:30.51,v:41726.0},{d:"2026-05-07",o:30.94,c:30.99,h:31.36,l:30.85,v:31041.0},{d:"2026-05-08",o:31.06,c:32.97,h:33.24,l:31.06,v:56936.0},{d:"2026-05-11",o:32.7,c:33.07,h:33.47,l:31.68,v:63103.0},{d:"2026-05-12",o:32.81,c:32.32,h:33.1,l:31.92,v:33197.0},{d:"2026-05-13",o:32.26,c:31.97,h:32.76,l:31.68,v:28389.0},{d:"2026-05-14",o:31.88,c:31.19,h:31.88,l:31.15,v:30783.0},{d:"2026-05-15",o:31.07,c:30.99,h:31.77,l:30.7,v:28732.0},{d:"2026-05-18",o:30.99,c:31.2,h:31.57,l:30.74,v:24593.0},{d:"2026-05-19",o:31.17,c:31.19,h:31.47,l:30.67,v:21052.0},{d:"2026-05-20",o:31.2,c:30.96,h:31.29,l:30.57,v:21089.0},{d:"2026-05-21",o:30.77,c:29.7,h:31.05,l:29.52,v:25074.0},{d:"2026-05-22",o:29.87,c:30.72,h:31.04,l:29.71,v:24073.0},{d:"2026-05-25",o:30.37,c:30.27,h:31.18,l:29.8,v:26780.0},{d:"2026-05-26",o:30.26,c:29.38,h:30.36,l:28.98,v:19659.0},{d:"2026-05-27",o:29.34,c:28.38,h:29.45,l:28.12,v:24944.0},{d:"2026-05-28",o:28.38,c:28.62,h:29.02,l:27.81,v:20653.0},{d:"2026-05-29",o:28.86,c:27.23,h:29.1,l:27.02,v:24499.0},{d:"2026-06-01",o:27.24,c:27.9,h:28.25,l:27.07,v:22262.0},{d:"2026-06-02",o:28.3,c:26.87,h:28.3,l:26.55,v:15789.0},{d:"2026-06-03",o:27.0,c:26.24,h:27.01,l:25.92,v:19014.0},{d:"2026-06-04",o:26.15,c:25.48,h:26.42,l:25.23,v:17158.0},{d:"2026-06-05",o:25.48,c:26.13,h:26.55,l:25.0,v:22360.0},{d:"2026-06-08",o:25.47,c:25.21,h:26.42,l:24.77,v:29127.0},{d:"2026-06-09",o:25.55,c:25.12,h:25.65,l:24.74,v:19057.0},{d:"2026-06-10",o:24.93,c:24.66,h:25.25,l:23.98,v:19542.0},{d:"2026-06-11",o:24.18,c:24.16,h:24.78,l:23.7,v:15409.0},{d:"2026-06-12",o:24.87,c:25.2,h:25.7,l:23.87,v:29964.0},{d:"2026-06-15",o:24.91,c:25.78,h:26.8,l:24.91,v:30958.0},{d:"2026-06-16",o:25.64,c:25.63,h:25.98,l:25.26,v:19168.0},{d:"2026-06-17",o:25.82,c:24.65,h:25.82,l:24.41,v:19415.0},{d:"2026-06-18",o:24.58,c:24.3,h:25.03,l:23.91,v:16154.0},{d:"2026-06-22",o:24.27,c:24.45,h:24.45,l:23.05,v:24090.0},{d:"2026-06-23",o:24.69,c:24.61,h:25.08,l:24.5,v:19933.0},{d:"2026-06-24",o:24.52,c:23.53,h:24.93,l:23.38,v:21381.0},{d:"2026-06-25",o:23.39,c:22.81,h:23.54,l:22.46,v:22528.0},{d:"2026-06-26",o:22.5,c:21.9,h:22.95,l:21.69,v:19443.0},{d:"2026-06-29",o:22.06,c:21.79,h:22.36,l:21.12,v:25980.0},{d:"2026-06-30",o:21.79,c:21.85,h:22.3,l:21.46,v:17599.0},{d:"2026-07-01",o:21.85,c:22.12,h:22.43,l:21.66,v:18072.0},{d:"2026-07-02",o:22.0,c:22.62,h:23.36,l:21.88,v:25825.0},{d:"2026-07-03",o:22.82,c:24.53,h:24.8,l:22.67,v:44032.0},{d:"2026-07-06",o:24.28,c:24.08,h:25.35,l:23.89,v:28835.0},{d:"2026-07-07",o:24.01,c:23.01,h:24.16,l:22.92,v:16925.0},{d:"2026-07-08",o:23.02,c:22.25,h:23.2,l:22.08,v:16119.0},{d:"2026-07-09",o:22.36,c:21.83,h:22.41,l:21.31,v:17292.0},{d:"2026-07-10",o:21.49,c:22.58,h:23.15,l:21.49,v:20572.0},{d:"2026-07-13",o:22.63,c:21.43,h:22.63,l:21.28,v:20972.0},{d:"2026-07-14",o:21.43,c:21.72,h:21.78,l:20.76,v:16865.0},{d:"2026-07-15",o:21.73,c:21.7,h:22.21,l:21.54,v:11028.0},{d:"2026-07-16",o:21.58,c:22.4,h:22.8,l:21.28,v:17565.0},{d:"2026-07-17",o:22.12,c:21.18,h:22.62,l:21.01,v:17309.0},{d:"2026-07-20",o:21.11,c:20.34,h:22.07,l:19.95,v:25287.0},{d:"2026-07-21",o:20.15,c:20.22,h:20.5,l:18.89,v:26521.0},{d:"2026-07-22",o:20.11,c:19.54,h:20.37,l:19.37,v:15556.0},{d:"2026-07-23",o:19.75,c:20.57,h:20.67,l:19.54,v:18158.0},{d:"2026-07-24",o:20.32,c:20.21,h:20.6,l:20.1,v:10753.0},{d:"2026-07-27",o:20.0,c:20.7,h:21.01,l:20.0,v:12080.0},{d:"2026-07-28",o:20.69,c:20.78,h:21.23,l:20.48,v:10980.0},{d:"2026-07-29",o:20.75,c:21.25,h:21.5,l:20.6,v:14095.0},{d:"2026-07-30",o:21.36,c:20.86,h:21.77,l:20.72,v:13004.0},{d:"2026-07-31",o:21.0,c:21.38,h:21.6,l:21.0,v:11210.0},{d:"2026-08-03",o:21.5,c:22.29,h:22.35,l:21.3,v:16677.0},{d:"2026-08-04",o:22.43,c:22.41,h:22.7,l:22.19,v:12403.0},{d:"2026-08-05",o:22.52,c:22.53,h:22.8,l:22.17,v:13961.0},{d:"2026-08-06",o:22.66,c:22.96,h:23.02,l:22.37,v:12481.0},{d:"2026-08-07",o:22.96,c:22.98,h:23.05,l:22.43,v:11038.0},{d:"2026-08-10",o:22.98,c:24.44,h:24.88,l:22.87,v:32214.0},{d:"2026-08-11",o:24.31,c:24.05,h:24.6,l:23.8,v:19799.0},{d:"2026-08-12",o:23.94,c:23.86,h:24.28,l:23.82,v:11460.0},{d:"2026-08-13",o:23.87,c:23.95,h:24.4,l:23.8,v:16150.0},{d:"2026-08-14",o:24.31,c:25.38,h:26.1,l:23.7,v:40965.0},{d:"2026-08-17",o:25.18,c:25.93,h:26.03,l:24.7,v:36384.0},{d:"2026-08-18",o:25.82,c:27.15,h:27.4,l:25.14,v:35039.0},{d:"2026-08-19",o:27.07,c:28.3,h:28.4,l:26.35,v:87968.0},{d:"2026-08-20",o:28.3,c:29.32,h:31.28,l:28.0,v:109316.0},{d:"2026-08-21",o:28.08,c:28.84,h:29.5,l:27.88,v:67086.0},{d:"2026-08-24",o:28.9,c:29.46,h:29.87,l:28.36,v:58146.0},{d:"2026-08-25",o:29.47,c:31.07,h:31.5,l:29.11,v:60587.0},{d:"2026-08-26",o:31.2,c:30.87,h:31.37,l:29.88,v:49710.0},{d:"2026-08-27",o:30.8,c:31.24,h:32.4,l:30.17,v:52507.0},{d:"2026-08-28",o:31.92,c:32.3,h:32.7,l:31.21,v:41934.0},{d:"2026-08-31",o:32.27,c:32.39,h:33.45,l:31.87,v:51606.0},{d:"2026-09-01",o:32.37,c:32.68,h:33.0,l:31.7,v:46624.0},{d:"2026-09-02",o:32.61,c:33.05,h:33.76,l:32.34,v:35432.0},{d:"2026-09-03",o:33.37,c:33.8,h:34.58,l:33.12,v:45429.0},{d:"2026-09-04",o:33.8,c:32.96,h:34.74,l:32.85,v:55968.0},{d:"2026-09-07",o:33.51,c:34.58,h:35.0,l:32.49,v:71005.0},{d:"2026-09-08",o:34.36,c:32.92,h:34.63,l:32.71,v:65917.0}];
+const dates = KLINE.map(k => k.d);
+const ohlc  = KLINE.map(k => ({o:k.o, c:k.c, h:k.h, l:k.l}));
+const vols  = KLINE.map(k => k.v);
+const idxMap = {};
+dates.forEach((d,i) => idxMap[d]=i);
+
+function ma20Series(arr) {
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    if (i < 19) { out.push(null); continue; }
+    const s = arr.slice(i-19, i+1).reduce((a,b)=>a+b,0) / 20;
+    out.push(+s.toFixed(2));
+  }
+  return out;
+}
+
+function renderChart() {
+  const canvas = document.getElementById('priceChart');
+  const candleColors = ohlc.map(b => b.c >= b.o ? '#d63333' : '#2a7f3f');
+  const borderColors = ohlc.map(b => b.c >= b.o ? '#a32d2d' : '#1e5c2c');
+
+  new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: dates,
+      datasets: [
+        {
+          label: '日K',
+          data: ohlc.map(b => [b.o, b.h, b.l, b.c]),
+          backgroundColor: candleColors,
+          borderColor: borderColors,
+          borderWidth: 0.5,
+          barPercentage: 0.7,
+          categoryPercentage: 0.9,
+        },
+        {
+          label: '20日均线',
+          data: ma20Series(ohlc.map(o => o.c)),
+          type: 'line',
+          borderColor: '#185fa5',
+          borderWidth: 1.2,
+          pointRadius: 0,
+          fill: false,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              if (ctx.datasetIndex === 0) {
+                const o = ohlc[ctx.dataIndex];
+                return `开${o.o} 高${o.h} 低${o.l} 收${o.c}`;
+              }
+              return ctx.formattedValue;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { autoSkip: true, maxTicksLimit: 14, font: { size: 11 } },
+          grid: { display: false }
+        },
+        y: {
+          ticks: { font: { size: 11 } },
+          grid: { color: 'rgba(0,0,0,0.06)' }
+        }
+      }
+    },
+    plugins: [{
+      id: 'chanMarks',
+      afterDatasetsDraw(chart) {
+        const { ctx, scales } = chart;
+        const x = scales.x, y = scales.y;
+        ctx.save();
+        const points = [
+          {date:'2026-06-29', price:21.12, color:'#2a7f3f', label:'06-29 底背驰 21.12'},
+          {date:'2026-07-21', price:18.89, color:'#2a7f3f', label:'07-21 二次底背驰 18.89'},
+          {date:'2026-09-07', price:35.00, color:'#a32d2d', label:'09-07 近期顶 35.00'},
+        ];
+        points.forEach(p => {
+          const i = idxMap[p.date];
+          if (i === undefined) return;
+          const px = x.getPixelForValue(i);
+          const py = y.getPixelForValue(p.price);
+          ctx.beginPath();
+          ctx.arc(px, py, 5, 0, 2*Math.PI);
+          ctx.fillStyle = p.color;
+          ctx.fill();
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          ctx.fillStyle = p.color;
+          ctx.font = '11px -apple-system, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(p.label, px, py - 10);
+        });
+        ctx.strokeStyle = '#b66b16';
+        ctx.setLineDash([4, 3]);
+        ctx.lineWidth = 1;
+        const x1 = x.getPixelForValue(idxMap['2026-06-15']);
+        const x2 = x.getPixelForValue(dates.length - 1);
+        const yHi = y.getPixelForValue(26.80);
+        const yLo = y.getPixelForValue(21.12);
+        ctx.strokeRect(x1, yHi, x2-x1, yLo-yHi);
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#b66b16';
+        ctx.font = '11px -apple-system, sans-serif';
+        ctx.fillText('日线中枢 21-26.8', (x1+x2)/2, yHi + 14);
+      }
+    }]
+  });
+}
+renderChart();
+</script>
+
+
+</body>
+</html>
