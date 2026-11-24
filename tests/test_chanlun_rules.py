@@ -186,6 +186,60 @@ class SignalsTests(unittest.TestCase):
             if item.comparator == "below":
                 self.assertIn("现价未知", item.rationale)
 
+    def test_structural_falsification_findings_land_on_the_falsification_dimension(self):
+        # 设计文档 §5.1 / 主规格 §5.3：anchor-chanlun 要同时贡献「证伪条件」与
+        # 「位置与时机」两个维度。若全部发现都落在位置与时机，证伪条件（权重 25%）
+        # 会恒为 no_reviewer 被剔除，总分实际只除以 15% 的权重。
+        st = structure()
+        st["levels"]["day"]["nearby_pivots"] = [
+            {"from": "2026-02-05", "to": "2026-09-22", "ZD": 22.39, "ZG": 29.04,
+             "role": "recent", "dist_pct": 44.08}
+        ]
+        findings, _ = rules.evaluate(BULLISH, st, 15.54)
+        by_code = {f.code: f for f in findings}
+        # 中枢距现价远 → 结构位证伪条件不可靠 → 归「证伪条件」
+        self.assertEqual(by_code["CHAN_PIVOT_FAR_FROM_PRICE"].dimension, "证伪条件")
+        # 现价在中枢内部 → 说清了失效线在哪 → 也归「证伪条件」
+        st2 = structure()
+        st2["levels"]["day"]["nearby_pivots"] = [
+            {"from": "2025-08-04", "to": "2026-02-05", "ZD": 11.84, "ZG": 14.05,
+             "role": "current", "dist_pct": -9.59}
+        ]
+        findings2, _ = rules.evaluate(BULLISH, st2, 13.0)
+        by_code2 = {f.code: f for f in findings2}
+        self.assertEqual(by_code2["CHAN_PRICE_INSIDE_PIVOT"].dimension, "证伪条件")
+
+    def test_position_findings_stay_on_the_position_dimension(self):
+        # 「位置与时机」维度的贡献不能被上面那条改动挤掉
+        st = structure()
+        st["levels"]["week"]["bias"] = "down"
+        findings, _ = rules.evaluate(BULLISH, st, 15.54)
+        by_code = {f.code: f for f in findings}
+        self.assertEqual(by_code["CHAN_HIGHER_LEVEL_DENIES"].dimension, "位置与时机")
+
+    def test_horizon_hint_is_capped_by_its_own_findings(self):
+        # 同一份结论不能自相矛盾：finding 说「把观察期放在短线档」，
+        # horizon_hint 就不能给 long。
+        st = structure()
+        st["levels"]["week"]["bias"] = "up"
+        st["levels"]["week"]["recent_divergence"] = None
+        st["levels"]["day"]["signal"] = "中枢上方 · 底背驰预警"
+        findings, _ = rules.evaluate(BULLISH, st, 15.54)
+        codes = [f.code for f in findings]
+        self.assertIn("CHAN_SECOND_BUY_NO_BACKING", codes)
+        hint = signals.build_horizon_hint(BULLISH, st, findings, last_close=15.54)
+        self.assertEqual(hint.tier, "short")
+        self.assertIn("降为 short", hint.rationale)
+
+    def test_horizon_hint_keeps_long_tier_when_no_cap_applies(self):
+        # 没有降档约束时，档位逻辑保持原样
+        st = structure()
+        st["levels"]["week"]["bias"] = "up"
+        st["levels"]["week"]["recent_divergence"] = {"active": True, "kind": "bottom"}
+        st["levels"]["day"]["signal"] = "中枢上方 · 底背驰预警"
+        hint = signals.build_horizon_hint(BULLISH, st, [], last_close=15.54)
+        self.assertEqual(hint.tier, "long")
+
 
 if __name__ == "__main__":
     unittest.main()

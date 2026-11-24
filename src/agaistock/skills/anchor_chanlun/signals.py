@@ -7,6 +7,39 @@ from ...reviewers.contract import Finding, HorizonHint, ProposedInvalidation
 
 TOLERANCE_PCT = 0.5
 
+# 档位的保守程度：允许的观察窗口越短 = 越保守。
+# （Task 12 的 resolve_tier 用同一套语义做跨点评师取最保守）
+TIER_RANK = {"short": 0, "mid": 1, "event": 1, "long": 2}
+
+# 点评师**自己的发现**对观察期档位构成上限。
+# 依据是 rules.py 每条规则的 suggested_fix 里已经写明的处置：
+#   「把观察期放在短线档」/「按减仓、观望处理」/「重新检查主张是否已被否定」→ 短线
+#   「按单级别处理」/「降级使用」/「不依赖中枢的读面」→ 不超过中期
+# 没有这张表时，build_horizon_hint 收了 findings 参数却不用，会出现
+# 「finding 说『把观察期放在短线档』，horizon_hint 却给 long」这种自相矛盾的结论。
+FINDING_TIER_CAPS = {
+    "CHAN_HIGHER_LEVEL_DENIES": "short",
+    "CHAN_POSITION_SIZE_CAP": "short",
+    "CHAN_TOP_DIVERGENCE_OVERRIDES": "short",
+    "CHAN_DIRECTION_CONFLICT": "short",
+    "CHAN_SECOND_BUY_NO_BACKING": "short",
+    "CHAN_NESTING_UNCONFIRMED": "mid",
+    "CHAN_WINDOW_THIN": "mid",
+    "CHAN_PIVOT_FAR_FROM_PRICE": "mid",
+}
+
+
+def _cap_from_findings(findings: list[Finding]) -> str | None:
+    """由发现推出档位上限（多条发现取最保守的那个）。"""
+    cap: str | None = None
+    for finding in findings or []:
+        limit = FINDING_TIER_CAPS.get(finding.code)
+        if limit is None:
+            continue
+        if cap is None or TIER_RANK[limit] < TIER_RANK[cap]:
+            cap = limit
+    return cap
+
 
 def _levels(structure: dict[str, Any]) -> dict[str, Any]:
     return structure.get("levels") or {}
@@ -119,6 +152,14 @@ def build_horizon_hint(
     if observation.get("trigger"):
         tier = "event"
         rationale = f"存在明确催化剂（{observation.get('trigger')}），按事件驱动锚定"
+
+    # 档位上限：点评师自己的发现不能被自己的观察期建议推翻。
+    # （rules.py 的 suggested_fix 常写着「把观察期放在短线档」；若这里仍给 long，
+    #   同一份结论里就会自相矛盾。）
+    cap = _cap_from_findings(findings)
+    if cap is not None and TIER_RANK.get(cap, 99) < TIER_RANK.get(tier, 0):
+        rationale = f"{rationale}；受本次发现约束，观察期档位降为 {cap}"
+        tier = cap
 
     # 必须传真实的 last_close —— 用 0.0 会让「现价是否落在中枢内部」的判断失效
     checks = [

@@ -45,11 +45,12 @@ def _level(structure: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def _finding(code: str, severity: str, claim: str, why: str,
-             evidence_ref: list[str], suggested_fix: str) -> Finding:
+             evidence_ref: list[str], suggested_fix: str,
+             dimension: str = DIMENSION_POSITION) -> Finding:
     return Finding(
         code=code,
         severity=severity,
-        dimension=DIMENSION_POSITION,
+        dimension=dimension,
         delta=RULE_DELTAS.get(code, 0),
         claim=claim,
         why=why,
@@ -147,6 +148,11 @@ def evaluate(observation: dict, structure: dict, last_close: float) -> tuple[lis
                     "中枢不贴近现价时，「中枢上方/下方运行」这个标签对当期决策几乎没有参考价值。",
                     [f"chan.levels.{level_name}.nearby_pivots"],
                     "把判断重心转向双底/双顶结构、动能收缩或放大、MACD 交叉与成交量等不依赖中枢的读面",
+                    # 归到「证伪条件」维度：本级别中枢上下沿就是结构位证伪条件，
+                    # 中枢不贴近现价时这个证伪位不可靠。
+                    # 设计文档 §5.1 / 主规格 §5.3 —— anchor-chanlun 要同时贡献
+                    # 「证伪条件」与「位置与时机」两个维度，不能只占后者。
+                    dimension=DIMENSION_FALSIFICATION,
                 ))
                 break
 
@@ -225,6 +231,8 @@ def evaluate(observation: dict, structure: dict, last_close: float) -> tuple[lis
                     "现价在中枢内部时，该中枢上下沿就是天然决胜位。",
                     [f"chan.levels.{level_name}.nearby_pivots"],
                     f"以 {zg} 作确认线、{zd} 作失效线",
+                    # 归到「证伪条件」维度：这条 finding 说的就是失效线在哪。
+                    dimension=DIMENSION_FALSIFICATION,
                 ))
                 break
 
