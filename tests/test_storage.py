@@ -48,6 +48,7 @@ class StorageTests(unittest.TestCase):
         }
         self.assertIn("observations", tables)
         self.assertIn("reviews", tables)
+        self.assertIn("adjustment_factors", tables)
 
     def test_insert_and_list_observation(self):
         conn = make_conn()
@@ -130,6 +131,47 @@ class StorageTests(unittest.TestCase):
         latest = db.latest_reviews(conn, obs_id)
         self.assertEqual(len(latest), 1)
         self.assertEqual(latest[0]["reviewer_id"], "anchor-chanlun")
+
+    def test_insert_and_list_adjustment_factors(self):
+        conn = make_conn()
+        written = db.insert_adjustment_factors(
+            conn,
+            "002378",
+            [
+                {"ex_date": "2025-06-06", "factor": 2.6, "constant": 1.9432},
+                {"ex_date": "2026-06-26", "factor": 2.6, "constant": 2.2552},
+            ],
+        )
+        self.assertEqual(written, 2)
+        rows = db.list_adjustment_factors(conn, "002378")
+        # 按 ex_date 降序：最近的除权事件排在最前
+        self.assertEqual([r["ex_date"] for r in rows], ["2026-06-26", "2025-06-06"])
+        self.assertEqual(rows[0]["factor"], 2.6)
+        self.assertEqual(rows[0]["constant"], 2.2552)
+
+    def test_insert_adjustment_factors_upserts_same_ex_date(self):
+        conn = make_conn()
+        db.insert_adjustment_factors(
+            conn, "002378", [{"ex_date": "2026-06-26", "factor": 2.6, "constant": 2.2552}]
+        )
+        db.insert_adjustment_factors(
+            conn, "002378", [{"ex_date": "2026-06-26", "factor": 2.6, "constant": 9.9999}]
+        )
+        rows = db.list_adjustment_factors(conn, "002378")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["constant"], 9.9999)
+
+    def test_list_adjustment_factors_is_symbol_scoped(self):
+        conn = make_conn()
+        db.insert_adjustment_factors(
+            conn, "002378", [{"ex_date": "2026-06-26", "factor": 2.6, "constant": 2.2552}]
+        )
+        db.insert_adjustment_factors(
+            conn, "600519", [{"ex_date": "2026-06-26", "factor": 1.0, "constant": 1.0}]
+        )
+        rows = db.list_adjustment_factors(conn, "600519")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["symbol"], "600519")
 
 
 if __name__ == "__main__":

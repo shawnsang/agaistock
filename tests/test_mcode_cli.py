@@ -21,8 +21,11 @@ class McodeCliTests(unittest.TestCase):
     @mock.patch("agaistock.providers.mcode_cli.subprocess.run")
     def test_call_connector_raises_on_non_zero_exit(self, fake_run):
         fake_run.return_value = mock.Mock(returncode=1, stdout="", stderr="boom")
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(RuntimeError) as ctx:
             mcode_cli.call_connector("some__tool", {})
+        # MCodedToolsMissing 是 RuntimeError 的子类，只断言 RuntimeError 分辨不出来：
+        # 连接器自身报错必须不能被误判成「CLI 不在 PATH」。
+        self.assertNotIsInstance(ctx.exception, mcode_cli.MCodedToolsMissing)
 
     @mock.patch("agaistock.providers.mcode_cli.subprocess.run")
     def test_call_connector_uses_args_file_not_inline_json(self, fake_run):

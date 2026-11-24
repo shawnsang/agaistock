@@ -44,6 +44,15 @@ CREATE TABLE IF NOT EXISTS reviews (
 
 CREATE INDEX IF NOT EXISTS idx_reviews_obs
     ON reviews(observation_id, reviewer_id, ran_at);
+
+CREATE TABLE IF NOT EXISTS adjustment_factors (
+    symbol     TEXT NOT NULL,
+    ex_date    TEXT NOT NULL,
+    factor     REAL NOT NULL,
+    constant   REAL NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, ex_date)
+);
 """
 
 
@@ -183,3 +192,40 @@ def latest_reviews(conn: sqlite3.Connection, observation_id: str) -> list[dict]:
         item["verdict"] = json.loads(item.pop("verdict_json"))
         result.append(item)
     return result
+
+
+def insert_adjustment_factors(
+    conn: sqlite3.Connection, symbol: str, factors: list[dict[str, Any]]
+) -> int:
+    """写入复权因子；同一 (symbol, ex_date) 重复写入覆盖。"""
+    fetched_at = _now()
+    for item in factors:
+        conn.execute(
+            """INSERT INTO adjustment_factors
+               (symbol, ex_date, factor, constant, fetched_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(symbol, ex_date) DO UPDATE SET
+                   factor = excluded.factor,
+                   constant = excluded.constant,
+                   fetched_at = excluded.fetched_at""",
+            (
+                str(symbol),
+                str(item["ex_date"]),
+                float(item["factor"]),
+                float(item["constant"]),
+                fetched_at,
+            ),
+        )
+    conn.commit()
+    return len(factors)
+
+
+def list_adjustment_factors(conn: sqlite3.Connection, symbol: str) -> list[dict[str, Any]]:
+    """按 ex_date 降序返回该标的的复权因子。"""
+    rows = conn.execute(
+        """SELECT symbol, ex_date, factor, constant, fetched_at
+           FROM adjustment_factors WHERE symbol = ?
+           ORDER BY ex_date DESC""",
+        (str(symbol),),
+    )
+    return [dict(row) for row in rows]
