@@ -276,7 +276,7 @@ git commit -m "chore: init python package skeleton and config loaders"
   - `agaistock.storage.db.insert_observation(conn, observation: dict) -> str`，返回 id。
   - `agaistock.storage.db.list_observations(conn, include_deleted: bool = False) -> list[dict]`，默认过滤 `deleted_at IS NULL`。
   - `agaistock.storage.db.soft_delete_observation(conn, observation_id: str) -> bool`，置 `deleted_at`；找不到返回 False。
-  - `agaistock.storage.db.insert_review(conn, verdict: dict) -> str`，返回 id。
+  - `agaistock.storage.db.insert_review(conn, observation_id: str, verdict: dict) -> str`，返回 id。
   - `agaistock.storage.db.latest_reviews(conn, observation_id: str) -> list[dict]`，每位 reviewer 只返回 `ran_at` 最新的一条，按 `ran_at` 升序。
 
 - [ ] **Step 1: 写失败的测试**
@@ -455,6 +455,23 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _position_json(observation: dict[str, Any]) -> str:
+    """把观察里的持仓信息落成 position_json 列的文本。
+
+    同时接受两种键名：
+      - ``position_json``：已序列化的字符串，原样存
+      - ``position``：dict / list，序列化后存
+
+    优先取 ``position_json``，缺失时回退到 ``position``，两者都缺时存 "{}"。
+    """
+    raw = observation.get("position_json")
+    if raw is None:
+        raw = observation.get("position", {})
+    if isinstance(raw, str):
+        return raw
+    return json.dumps(raw, ensure_ascii=False)
+
+
 def insert_observation(conn: sqlite3.Connection, observation: dict[str, Any]) -> str:
     obs_id = observation.get("id") or f"obs_{datetime.now().strftime('%Y%m%d%H%M%S')}_{abs(hash(str(observation))) % 100000}"
     conn.execute(
@@ -472,7 +489,7 @@ def insert_observation(conn: sqlite3.Connection, observation: dict[str, Any]) ->
             float(observation.get("confidence") or 0),
             observation.get("timeframe", ""),
             observation.get("trigger", ""),
-            json.dumps(observation.get("position", {}), ensure_ascii=False),
+            _position_json(observation),
             observation.get("raw_text", ""),
             None,
         ),
