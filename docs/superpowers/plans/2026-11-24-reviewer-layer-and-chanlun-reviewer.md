@@ -3392,7 +3392,7 @@ def build_horizon_hint(
 python -m unittest tests.test_chanlun_rules -v
 ```
 
-Expected: 23 tests PASS（`RulesTests` 13 条 + `SignalsTests` 10 条）
+Expected: 23 tests PASS（`RulesTests` 11 条 + `SignalsTests` 12 条）
 
 - [ ] **Step 6: Commit**
 
