@@ -160,6 +160,7 @@ export async function handleRoute(request, response, options = {}) {
   const {
     context = {},
     clientEntry = '',
+    renderModule = '',
     readObservations = async () => [],
     writeObservations = async () => {},
     parseObservation = async () => ({
@@ -176,6 +177,22 @@ export async function handleRoute(request, response, options = {}) {
   if (request.method === 'GET' && url.pathname === '/dashboard') {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(clientEntry);
+    return;
+  }
+
+  // 前端渲染模块是**第二个静态文件**（Task 15 把 render.mjs 从 index.html 里拆出来）。
+  // 宿主只把 index.html 交给 Node 进程（surface.path 是页面入口，不是静态文件服务器），
+  // server.mjs 也只路由 /dashboard 与 /api/*，其余一律 404 ——
+  // 不显式提供这条路由，浏览器里的 `<script type="module" src="./render.mjs">`
+  // 会拿到 404，window.agaistockRender 根本不存在，整页静默失效。
+  // 只白名单这一个文件，不做通用静态服务（避免路径穿越）。
+  if (request.method === 'GET' && url.pathname === '/render.mjs') {
+    if (!renderModule) {
+      sendJson(response, 404, { error: 'not_found' });
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
+    response.end(renderModule);
     return;
   }
 
@@ -309,6 +326,17 @@ export async function start(context) {
   const observationsPath = join(dataDir, OBSERVATIONS_FILE);
   const clientEntry = await readFile(join(context.pluginRoot, 'miniapp/client/index.html'));
 
+  // Task 15 把渲染逻辑拆到 render.mjs，页面用 <script type="module" src="./render.mjs"> 引入。
+  // 宿主只把 index.html 交给 Node 进程（surface.path 是页面入口，不是静态文件服务器），
+  // 所以 render.mjs 必须由本服务自己提供，否则页面里的 module 脚本 404、整页静默失效。
+  // 读不到文件时降级成空字符串 —— 让 start() 抛错会把整个 Mini App 拖到起不来。
+  let renderModule = '';
+  try {
+    renderModule = await readFile(join(context.pluginRoot, 'miniapp/client/render.mjs'), 'utf8');
+  } catch {
+    renderModule = '';
+  }
+
   const readObservations = async () => {
     try {
       const parsed = JSON.parse(await readFile(observationsPath, 'utf8'));
@@ -374,6 +402,7 @@ export async function start(context) {
     void handleRoute(request, response, {
       context,
       clientEntry,
+      renderModule,
       readObservations,
       writeObservations,
       parseObservation,

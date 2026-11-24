@@ -152,6 +152,28 @@ test('GET /dashboard serves the injected client entry', async () => {
   assert.match(response.body, /注入的页面/);
 });
 
+test('GET /render.mjs serves the front-end module with a javascript content type', async () => {
+  const response = new FakeResponse();
+  await handleRoute(
+    makeRequest('GET', '/render.mjs'),
+    response,
+    { renderModule: 'export const renderScore = () => "";\n', kernel: fakeKernel({}) },
+  );
+  assert.equal(response.statusCode, 200);
+  assert.match(response.headers['content-type'], /javascript/);
+  assert.match(response.body, /renderScore/);
+});
+
+test('GET /render.mjs returns 404 when the module was not loaded', async () => {
+  const response = new FakeResponse();
+  await handleRoute(
+    makeRequest('GET', '/render.mjs'),
+    response,
+    { kernel: fakeKernel({}) },
+  );
+  assert.equal(response.statusCode, 404);
+});
+
 test('POST /api/parse uses the injected parse helper', async () => {
   const response = new FakeResponse();
   const seen = [];
