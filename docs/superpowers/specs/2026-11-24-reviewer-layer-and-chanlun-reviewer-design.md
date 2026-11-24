@@ -177,7 +177,7 @@ D:\workroom\agaistock\
     ├── src/agaistock/**、config/**       ← 内核与配置的逐字节副本（随包走）
     ├── test/*.test.mjs                  ← node --test 用例
     ├── package.json、icon.png、.minimax-plugin/plugin.json   ← 插件打包清单与图标
-    └── data/                            ← ⚠️ 缠论分析缓存（运行时生成，不随包发布，见 §16.4）
+    └── （包内**没有**运行数据目录）                            ← 数据库与缠论分析工作目录都落宿主的 `context.dataDir`（§16.2）
 ```
 
 **与初稿的三处偏离（以实现为准）**：
