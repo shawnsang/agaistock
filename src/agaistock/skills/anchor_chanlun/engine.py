@@ -28,15 +28,20 @@ def vendor_root() -> Path:
 
 
 def _run_script(script: str, work_dir: Path, extra: list[str]) -> None:
-    result = subprocess.run(
-        [sys.executable, str(vendor_root() / "scripts" / script), str(work_dir), *extra],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=str(work_dir),
-        timeout=SCRIPT_TIMEOUT,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(vendor_root() / "scripts" / script), str(work_dir), *extra],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(work_dir),
+            timeout=SCRIPT_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # 失败契约统一为 RuntimeError —— 调用方按 `except RuntimeError` 捕获即可，
+        # 不必知道超时是 subprocess 的另一类异常。
+        raise RuntimeError(f"{script} 执行超时(>{SCRIPT_TIMEOUT}s)") from exc
     if result.returncode != 0:
         # 上游脚本只用 print() 报告原因，**不写 stderr** —— 只看 stderr 会得到空消息。
         detail = ((result.stdout or "") + (result.stderr or "")).strip()

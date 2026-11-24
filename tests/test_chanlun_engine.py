@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from agaistock.skills.anchor_chanlun import engine
 
@@ -85,6 +86,21 @@ class ChanlunEngineTests(unittest.TestCase):
                 engine._run_script("chan_analyze.py", Path(tmp), ["--level", "day"])
         # 上游 vendor 已固定版本，这条断言锁住它的报错文案
         self.assertIn("未找到 K 线文件", str(ctx.exception))
+
+    def test_run_script_timeout_is_reported_as_runtime_error(self):
+        # 失败契约统一为 RuntimeError：调用方（Task 8/10 的失败隔离）只 catch 一种异常，
+        # 不需要额外知道 subprocess.TimeoutExpired 的存在。
+        with mock.patch.object(
+            engine.subprocess,
+            "run",
+            side_effect=engine.subprocess.TimeoutExpired(
+                cmd="chan_analyze.py", timeout=engine.SCRIPT_TIMEOUT
+            ),
+        ):
+            with TemporaryDirectory() as tmp:
+                with self.assertRaises(RuntimeError) as ctx:
+                    engine._run_script("chan_analyze.py", Path(tmp), ["--level", "day"])
+        self.assertIn("超时", str(ctx.exception))
 
 
 if __name__ == "__main__":
