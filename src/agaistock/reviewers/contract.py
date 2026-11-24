@@ -181,4 +181,12 @@ def validate_verdict(verdict: ReviewVerdict, dimensions: list[str]) -> list[str]
             errors.append(f"findings[{index}].delta 必须为整数")
     if verdict.horizon_hint is not None and verdict.horizon_hint.tier not in HORIZON_TIERS:
         errors.append(f"horizon_hint.tier 非法: {verdict.horizon_hint.tier!r}")
+    # 硬约束：有发现就必须随结论一起给出限制声明（设计文档 §2.2）。
+    # 没有发现的点评师（如 skipped）不需要限制声明，不在此处报错。
+    if verdict.findings and not verdict.caveats:
+        missing = ", ".join(f"[{i}]{f.code}" for i, f in enumerate(verdict.findings))
+        errors.append(
+            f"caveats 为空：以下 finding 缺少限制声明（{missing}）；"
+            "限制声明缺失等于把机械结论当结论"
+        )
     return errors
