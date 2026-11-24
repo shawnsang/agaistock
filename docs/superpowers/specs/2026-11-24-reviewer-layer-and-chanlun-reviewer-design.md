@@ -749,7 +749,7 @@ ReviewVerdict
 - **观察版本链（`supersedes_id`）**：§6.3 要求「采纳」产生新版本行 + supersedes 关系，当前存储模型没有版本链，直接改数组会破坏「观察记录只追加不修改」的不变量 → **「采纳」按钮本轮禁用**并写明原因；启用「采纳」的前提是先建版本链。
 - `contract.py` 的 bool delta / 浅拷贝 / `duration_ms` 类型收紧
 - `engine.py` 的错误归因与失败路径丢字段
-- `persist()` 的**两条落库路径**（正常落库 / 占位→`status="error"` verdict）缺「提交进仓库」的测试锁定
+- `persist()` 的**两条落库路径**（正常落库 / 评审失败时转成 `status="error"` 的兜底 verdict）缺「提交进仓库」的测试锁定
 - `src/agaistock/mcp/` 的 MCP 工具暴露
 - 上游 `resonance` / `window_alignment` / `key_levels` 未接入（设计级，下一轮）
 - `AGAISTOCK_DATA_DIR` 若给的是**相对路径**，会按内核 cwd 解析（安装副本里 cwd 就是包根）→ 将来要加绝对路径守卫；宿主目前总是给绝对路径，暂不可达。

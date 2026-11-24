@@ -8584,7 +8584,7 @@ node tools\check-spec.mjs docs\superpowers\plans\2026-11-24-reviewer-layer-and-c
 $env:AGAISTOCK_DATA_DIR='D:\ambient\host\data'; node --test "miniapps/agaistock/test/*.test.mjs"
 ```
 
-预期：**54/54 全绿**（修之前这里是 52/54、fail 2）。
+预期：**57/57 全绿**（修之前这里是 52/54、fail 2；加了 3 条新测试后总数从 54 变成 57）。
 
 **并重跑变异检查**（`.tmp/task20-fix/check_m6_m7.py`，控制器已把变异更新成下面三种「真实回归」形态）：
 
