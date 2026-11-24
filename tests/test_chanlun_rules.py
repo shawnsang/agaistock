@@ -210,12 +210,57 @@ class SignalsTests(unittest.TestCase):
         self.assertEqual(by_code2["CHAN_PRICE_INSIDE_PIVOT"].dimension, "证伪条件")
 
     def test_position_findings_stay_on_the_position_dimension(self):
-        # 「位置与时机」维度的贡献不能被上面那条改动挤掉
+        # 「位置与时机」维度的贡献不能被上面那条改动挤掉。
+        # 这里逐条核对**所有会被观察到的规则码**：把一条位置类规则挪到证伪维度，
+        # 会把 15% 的位置维度悄悄挪进 25% 的证伪维度（finding A 的反向风险），
+        # 而 delta 最大的 CHAN_DIRECTION_CONFLICT（−18）最容易被误改。
+        falsification_codes = {"CHAN_PRICE_INSIDE_PIVOT", "CHAN_PIVOT_FAR_FROM_PRICE"}
+        seen: dict[str, str] = {}
+
+        def collect(observation, st, last_close):
+            findings, _ = rules.evaluate(observation, st, last_close)
+            for f in findings:
+                seen.setdefault(f.code, f.dimension)
+
+        # 场景 1：看多 + 周线向下 + 日线顶背驰
+        # → 高一级否决 / 仓位上限 / 顶背驰优先 / 方向冲突 / 中枢离现价远
         st = structure()
         st["levels"]["week"]["bias"] = "down"
-        findings, _ = rules.evaluate(BULLISH, st, 15.54)
-        by_code = {f.code: f for f in findings}
-        self.assertEqual(by_code["CHAN_HIGHER_LEVEL_DENIES"].dimension, "位置与时机")
+        st["levels"]["day"]["signal"] = "中枢上方 · 顶背驰预警"
+        st["levels"]["day"]["nearby_pivots"] = [
+            {"from": "2023-01-04", "to": "2023-05-04", "ZD": 8.0, "ZG": 9.0,
+             "role": "support", "dist_pct": -42.0},
+            {"from": "2026-02-05", "to": "2026-09-22", "ZD": 22.39, "ZG": 29.04,
+             "role": "recent", "dist_pct": 5.0},
+        ]
+        collect(BULLISH, st, 13.0)
+
+        # 场景 2：看空 + 日线底背驰 + 周线无背书 + 窗口偏薄 + 现价在中枢内部
+        # → 次买点无背书 / 窗口偏薄 / 位置≠趋势 / 现价在中枢内部
+        st2 = structure()
+        st2["levels"]["day"]["signal"] = "中枢下方 · 底背驰预警"
+        st2["levels"]["week"]["recent_divergence"] = None
+        st2["levels"]["day"]["window_verdict"] = "样本偏薄"
+        st2["levels"]["m30"]["nearby_pivots"] = [
+            {"from": "2025-08-04", "to": "2026-02-05", "ZD": 11.84, "ZG": 14.05,
+             "role": "current", "dist_pct": -9.59},
+        ]
+        collect({"direction": "bearish", "thesis": "要跌", "confidence": 0.6}, st2, 13.0)
+
+        # 证伪维度上只允许出现那两条
+        for code, dimension in seen.items():
+            if dimension == "证伪条件":
+                self.assertIn(code, falsification_codes)
+        # 其余规则码一律落在位置维度
+        for code, dimension in seen.items():
+            if code not in falsification_codes:
+                self.assertEqual(dimension, "位置与时机")
+        # 两条证伪类规则确实都被观察到了 —— 否则上面的循环是空的，等于没测
+        self.assertTrue(falsification_codes.issubset(set(seen)))
+        # 至少要覆盖到 delta 最重的那几条位置类规则，否则这个测试保护不到重点
+        self.assertIn("CHAN_DIRECTION_CONFLICT", seen)
+        self.assertIn("CHAN_HIGHER_LEVEL_DENIES", seen)
+        self.assertIn("CHAN_TOP_DIVERGENCE_OVERRIDES", seen)
 
     def test_horizon_hint_is_capped_by_its_own_findings(self):
         # 同一份结论不能自相矛盾：finding 说「把观察期放在短线档」，
@@ -239,6 +284,22 @@ class SignalsTests(unittest.TestCase):
         st["levels"]["day"]["signal"] = "中枢上方 · 底背驰预警"
         hint = signals.build_horizon_hint(BULLISH, st, [], last_close=15.54)
         self.assertEqual(hint.tier, "long")
+
+    def test_horizon_hint_cap_survives_the_trigger_override(self):
+        # 顺序要求：档位上限必须在 trigger 覆盖**之后**应用。
+        # 否则「有催化剂 + 有短线级发现」会被 event 静默盖掉 ——
+        # finding 说「把观察期放在短线档」，horizon_hint 却给 event。
+        st = structure()
+        st["levels"]["week"]["bias"] = "up"
+        st["levels"]["week"]["recent_divergence"] = None
+        st["levels"]["day"]["signal"] = "中枢下方 · 底背驰预警"
+        obs = dict(BULLISH)
+        obs["trigger"] = "2026-12-01 产量公告"
+        findings, _ = rules.evaluate(obs, st, 15.54)
+        self.assertIn("CHAN_SECOND_BUY_NO_BACKING", [f.code for f in findings])
+        hint = signals.build_horizon_hint(obs, st, findings, last_close=15.54)
+        self.assertEqual(hint.tier, "short")
+        self.assertIn("降为 short", hint.rationale)
 
 
 if __name__ == "__main__":
