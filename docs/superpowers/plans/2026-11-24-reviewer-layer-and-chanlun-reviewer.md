@@ -910,6 +910,13 @@ def validate_verdict(verdict: ReviewVerdict, dimensions: list[str]) -> list[str]
             )
         if finding.delta is None or not isinstance(finding.delta, int):
             errors.append(f"findings[{index}].delta 必须为整数")
+    # 契约硬约束：有发现却没有限制声明 = 把机械结论当结论，是本产品最容易产生的误导。
+    # findings 为空时（skipped 的点评师）不要求 caveats。
+    if verdict.findings and not verdict.caveats:
+        codes = [f.code for f in verdict.findings]
+        errors.append(
+            f"caveats 为空但存在 {len(codes)} 条发现，缺少限制声明: {codes}"
+        )
     if verdict.horizon_hint is not None and verdict.horizon_hint.tier not in HORIZON_TIERS:
         errors.append(f"horizon_hint.tier 非法: {verdict.horizon_hint.tier!r}")
     return errors
