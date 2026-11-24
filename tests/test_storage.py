@@ -191,6 +191,33 @@ class StorageTests(unittest.TestCase):
                 "reviewer_id": "", "reviewer_version": "0.1.0", "status": "ok",
             })
 
+    def test_insert_observation_stores_evidence_and_invalidation(self):
+        conn = make_conn()
+        db.insert_observation(conn, {
+            "symbol": "002378", "name": "章源钨业", "direction": "bullish",
+            "thesis": "钨价上涨", "confidence": 0.75,
+            "evidence": [{"text": "钨价从去年就开始涨", "type": "fact"}],
+            "invalidation": ["钨价跌回去年年底的水平"],
+        })
+        row = db.list_observations(conn)[0]
+        self.assertEqual(row["confidence"], 0.75)
+        self.assertEqual(row["invalidation"], ["钨价跌回去年年底的水平"])
+        self.assertEqual(row["evidence"][0]["type"], "fact")
+
+    def test_migration_adds_columns_to_existing_table(self):
+        # 老库没有这两列：migrate() 必须补上。
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE observations (id TEXT PRIMARY KEY, symbol TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, deleted_at TEXT)"
+        )
+        conn.commit()
+        db.migrate(conn)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(observations)")}
+        self.assertIn("evidence_json", columns)
+        self.assertIn("invalidation_json", columns)
+
     def test_list_observations_tiebreak_is_stable(self):
         # 两条 created_at 完全相同：顺序必须确定（后插入的在前）。
         conn = make_conn()

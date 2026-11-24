@@ -73,5 +73,24 @@ class EngineTests(unittest.TestCase):
         self.assertIn("不存在的维度", " ".join(verdict.caveats))
 
 
+    def test_error_verdict_with_empty_reviewer_version_is_still_persistable(self):
+        # 版本号为空串的点评师：结论落库时 reviewer_version 是必填，
+        # 不能让「定义有问题」升级成「整轮崩」。
+        class EmptyVersionReviewer:
+            id = "empty-version"
+            version = ""
+
+            def review(self, ctx):
+                raise RuntimeError("炸了")
+
+        ctx = contract.ReviewContext(
+            observation={}, symbol="002378", name="章源钨业", now="t",
+            data_dir=".", llm=None,
+        )
+        verdict = engine.run_one(EmptyVersionReviewer(), ctx)
+        self.assertEqual(verdict.status, "error")
+        self.assertTrue(verdict.reviewer_version, "版本号不能是空串")
+
+
 if __name__ == "__main__":
     unittest.main()

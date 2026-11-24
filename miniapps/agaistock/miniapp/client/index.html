@@ -565,7 +565,10 @@
               var payload = {
                 symbol: (currentDraft && currentDraft.symbol) || '',
                 name: (currentDraft && currentDraft.name) || '',
-                text: rawText.value
+                text: rawText.value,
+                // 把接入层解析出的结构化观察一起送过去 —— 内核要靠它落库用户的
+                // 依据、证伪条件和信心，否则这些信息在这里就丢了。
+                observation: currentDraft || null
               };
               setStatus(recordStatus, '正在保存并点评，可能要等一会儿…', 'warn');
               try {

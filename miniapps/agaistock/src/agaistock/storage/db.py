@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS observations (
     timeframe     TEXT,
     trigger       TEXT,
     position_json TEXT,
+    evidence_json TEXT,
+    invalidation_json TEXT,
     raw_text      TEXT,
     deleted_at    TEXT
 );
@@ -78,7 +80,23 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    _migrate_columns(conn)
     conn.commit()
+
+
+# 新增列用 ALTER TABLE 补齐：CREATE TABLE IF NOT EXISTS 不会给已存在的表加列。
+_MIGRATIONS = (
+    ("observations", "evidence_json", "TEXT"),
+    ("observations", "invalidation_json", "TEXT"),
+)
+
+
+def _migrate_columns(conn: sqlite3.Connection) -> None:
+    """给已存在的表补上新增的列（幂等）。"""
+    for table, column, declaration in _MIGRATIONS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def _position_json(observation: dict[str, Any]) -> str:
@@ -103,8 +121,9 @@ def insert_observation(conn: sqlite3.Connection, observation: dict[str, Any]) ->
     conn.execute(
         """INSERT INTO observations
            (id, symbol, name, created_at, direction, thesis, confidence,
-            timeframe, trigger, position_json, raw_text, deleted_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            timeframe, trigger, position_json, evidence_json, invalidation_json,
+            raw_text, deleted_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             obs_id,
             observation.get("symbol", ""),
@@ -116,6 +135,8 @@ def insert_observation(conn: sqlite3.Connection, observation: dict[str, Any]) ->
             observation.get("timeframe", ""),
             observation.get("trigger", ""),
             _position_json(observation),
+            json.dumps(observation.get("evidence") or [], ensure_ascii=False),
+            json.dumps(observation.get("invalidation") or [], ensure_ascii=False),
             observation.get("raw_text", ""),
             None,
         ),
@@ -124,12 +145,29 @@ def insert_observation(conn: sqlite3.Connection, observation: dict[str, Any]) ->
     return obs_id
 
 
+def _load_json_list(raw: str | None) -> list:
+    """把 JSON 列读成列表；坏数据当成空列表，不能让整张表读不出来。"""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return value if isinstance(value, list) else []
+
+
 def list_observations(conn: sqlite3.Connection, include_deleted: bool = False) -> list[dict]:
     sql = "SELECT * FROM observations"
     if not include_deleted:
         sql += " WHERE deleted_at IS NULL"
     sql += " ORDER BY created_at DESC, rowid DESC"
-    return [dict(row) for row in conn.execute(sql)]
+    rows = []
+    for row in conn.execute(sql):
+        item = dict(row)
+        item["evidence"] = _load_json_list(item.pop("evidence_json", None))
+        item["invalidation"] = _load_json_list(item.pop("invalidation_json", None))
+        rows.append(item)
+    return rows
 
 
 def soft_delete_observation(conn: sqlite3.Connection, observation_id: str) -> bool:

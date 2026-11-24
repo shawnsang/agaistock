@@ -66,6 +66,71 @@ def _parse_observation(symbol: str, name: str, text: str) -> dict:
     }
 
 
+def _observation_from_draft(draft: dict, symbol: str, name: str, text: str) -> dict:
+    """把接入层（Mini App 的 LLM 层）解析出的结构化观察转成内核的观察行。
+
+    **不盲信草稿**：每个字段都校验，不合法的退回关键词解析的结果。
+    理由：草稿来自模型输出，可能缺字段、类型不对、信心越界；
+    而观察记录是后面评分与校准的输入，不能带脏数据进去。
+    """
+    fallback = _parse_observation(symbol, name, text)
+    direction = draft.get("direction")
+    if direction not in ("bullish", "bearish", "neutral"):
+        direction = fallback["direction"]
+    raw_confidence = draft.get("confidence")
+    confidence = (
+        float(raw_confidence)
+        if isinstance(raw_confidence, (int, float)) and not isinstance(raw_confidence, bool)
+        else fallback["confidence"]
+    )
+    confidence = min(1.0, max(0.0, confidence))
+    thesis = str(draft.get("thesis") or "").strip() or fallback["thesis"]
+    evidence = []
+    for item in draft.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        item_text = str(item.get("text") or "").strip()
+        if not item_text:
+            continue
+        item_type = item.get("type")
+        evidence.append({
+            "text": item_text,
+            "type": item_type if item_type in ("fact", "assumption") else "assumption",
+        })
+    invalidation = [
+        str(item).strip()
+        for item in (draft.get("invalidation") or [])
+        if str(item or "").strip()
+    ]
+    position = draft.get("position")
+    return {
+        "symbol": symbol or fallback["symbol"],
+        "name": name or str(draft.get("name") or "").strip() or fallback["name"],
+        "direction": direction,
+        "thesis": thesis[:200],
+        "confidence": confidence,
+        "timeframe": str(draft.get("timeframe") or "").strip() or fallback["timeframe"],
+        "trigger": str(draft.get("trigger") or "").strip() or fallback["trigger"],
+        "position": position if isinstance(position, dict) else {},
+        "evidence": evidence,
+        "invalidation": invalidation,
+        "raw_text": text,
+    }
+
+
+def _load_structured_observation(path: str | None, symbol: str, name: str, text: str) -> dict:
+    """有结构化观察文件就用它，没有就退回关键词解析。"""
+    if not path:
+        return _parse_observation(symbol, name, text)
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise FileNotFoundError(f"结构化观察文件不存在: {file_path}")
+    draft = json.loads(file_path.read_text(encoding="utf-8"))
+    if not isinstance(draft, dict):
+        raise ValueError(f"结构化观察文件顶层必须是 JSON 对象: {file_path}")
+    return _observation_from_draft(draft, symbol, name, text)
+
+
 def run_reviewers(ctx, reviewers):  # pragma: no cover - 便于测试打桩
     return engine_mod.run_reviewers([r["instance"] for r in reviewers], ctx)
 
@@ -73,7 +138,9 @@ def run_reviewers(ctx, reviewers):  # pragma: no cover - 便于测试打桩
 def cmd_review(args) -> int:
     conn = _open(args.db)
     try:
-        observation = _parse_observation(args.symbol, args.name, args.text)
+        observation = _load_structured_observation(
+            args.observation_file, args.symbol, args.name, args.text
+        )
         observation_id = db.insert_observation(conn, observation)
 
         reviewers = registry.load_reviewers()
@@ -205,6 +272,8 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--symbol", required=True)
     review.add_argument("--name", default="")
     review.add_argument("--text", required=True)
+    review.add_argument("--observation-file", default=None,
+                        help="接入层解析出的结构化观察（JSON 文件）")
     review.add_argument("--db", default=None)
     review.add_argument("--json", action="store_true")
     review.set_defaults(func=cmd_review)

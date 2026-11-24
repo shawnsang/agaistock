@@ -18,6 +18,16 @@ def _dimension_names() -> list[str]:
     return [item["name"] for item in config.load_scoring()["dimensions"]]
 
 
+def _reviewer_version(reviewer) -> str:
+    """点评师版本号；空值用默认版本。
+
+    空版本号会被 db.insert_review 拒绝落库（reviewer_version 是必填），
+    而落库在异常隔离之外 —— 不能让「一个点评师定义有问题」变成「整轮崩掉」。
+    """
+    version = getattr(reviewer, "version", "")
+    return str(version).strip() or "0.0.0"
+
+
 def _error_verdict(
     reviewer_id: str,
     reviewer_version: str,
@@ -58,7 +68,7 @@ def run_one(reviewer, ctx: ReviewContext) -> ReviewVerdict:
     except Exception as exc:  # noqa: BLE001 —— 点评师故障必须被隔离
         return _error_verdict(
             getattr(reviewer, "id", "unknown"),
-            getattr(reviewer, "version", "0.0.0"),
+            _reviewer_version(reviewer),
             int((time.monotonic() - started) * 1000),
             [f"点评师执行失败: {type(exc).__name__}: {exc}"],
         )
@@ -79,7 +89,7 @@ def run_one(reviewer, ctx: ReviewContext) -> ReviewVerdict:
     except Exception as exc:  # noqa: BLE001 —— 点评师返回了非契约对象
         return _error_verdict(
             getattr(reviewer, "id", "unknown"),
-            getattr(reviewer, "version", "0.0.0"),
+            _reviewer_version(reviewer),
             duration,
             [f"点评师结果无法解析: {type(exc).__name__}: {exc}"],
         )
@@ -87,7 +97,7 @@ def run_one(reviewer, ctx: ReviewContext) -> ReviewVerdict:
     if errors:
         return _error_verdict(
             verdict.reviewer_id or getattr(reviewer, "id", "unknown"),
-            verdict.reviewer_version or getattr(reviewer, "version", "0.0.0"),
+            verdict.reviewer_version or _reviewer_version(reviewer),
             duration,
             [f"点评师结果未通过契约校验: {err}" for err in errors],
         )

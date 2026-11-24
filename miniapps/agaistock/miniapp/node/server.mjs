@@ -1,7 +1,7 @@
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 const OBSERVATIONS_FILE = 'observations.json';
 
@@ -181,7 +181,11 @@ export async function handleRoute(request, response, options = {}) {
     }),
     kernel = runKernel,
     dbPath = '',
+    dataDir = '',
   } = options;
+
+  // 结构化观察草稿的落地目录：优先用宿主给的数据目录，退回数据库所在目录。
+  const draftDir = dataDir || dirname(dbPath);
 
   const url = new URL(request.url ?? '/', 'http://miniapp.local');
 
@@ -283,29 +287,49 @@ export async function handleRoute(request, response, options = {}) {
       sendJson(response, 400, { ok: false, error: 'EMPTY_INPUT', message: '先说点什么。' });
       return;
     }
-    const result = await kernel([
-      'review',
-      '--symbol', String(body.symbol ?? ''),
-      '--name', String(body.name ?? ''),
-      '--text', text,
-      '--db', dbPath,
-      '--json',
-    ]);
-    if (result.code !== 0) {
-      sendJson(response, 422, {
-        ok: false,
-        error: 'KERNEL_FAILED',
-        message: (result.stderr || '').slice(-500) || `exit=${result.code}`,
-      });
-      return;
+    // 结构化观察（接入层 LLM 解析出来的草稿）写文件传给内核：
+    // 命令行长度有上限（Windows 约 32K），口述原文可能很长，不能拼在 argv 里。
+    const draft = body.observation && typeof body.observation === 'object' ? body.observation : null;
+    let draftPath = '';
+    if (draft) {
+      draftPath = join(
+        draftDir,
+        `observation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.json`,
+      );
+      await writeFile(draftPath, JSON.stringify(draft), 'utf8');
     }
-    const payload = parseKernelJson(result.stdout);
-    if (!payload) {
-      sendJson(response, 422, { ok: false, error: 'KERNEL_BAD_OUTPUT', message: result.stdout.slice(-300) });
+    try {
+      const args = [
+        'review',
+        '--symbol', String(body.symbol ?? ''),
+        '--name', String(body.name ?? ''),
+        '--text', text,
+        '--db', dbPath,
+        '--json',
+      ];
+      if (draftPath) args.push('--observation-file', draftPath);
+      const result = await kernel(args);
+      if (result.code !== 0) {
+        sendJson(response, 422, {
+          ok: false,
+          error: 'KERNEL_FAILED',
+          message: (result.stderr || '').slice(-500) || `exit=${result.code}`,
+        });
+        return;
+      }
+      const payload = parseKernelJson(result.stdout);
+      if (!payload) {
+        sendJson(response, 422, { ok: false, error: 'KERNEL_BAD_OUTPUT', message: result.stdout.slice(-300) });
+        return;
+      }
+      sendJson(response, 200, payload);
       return;
+    } finally {
+      // 草稿是临时文件：内核跑完就删，不留在宿主数据目录里。
+      if (draftPath) {
+        await rm(draftPath, { force: true }).catch(() => undefined);
+      }
     }
-    sendJson(response, 200, payload);
-    return;
   }
 
   if (request.method === 'GET' && url.pathname.endsWith('/reviews')) {
@@ -446,6 +470,7 @@ export async function start(context) {
       parseObservation,
       kernel,
       dbPath,
+      dataDir,
     }).catch(() => {
       if (!response.headersSent) sendJson(response, 500, { error: 'internal_error' });
     });

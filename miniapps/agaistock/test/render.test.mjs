@@ -128,6 +128,18 @@ test('renderObservationRows renders kernel observation rows', () => {
   assert.match(html, /72%/);
 });
 
+test('renderObservationRows shows the real confidence and invalidation', () => {
+  const html = renderObservationRows([{
+    id: 'obs_1', created_at: '2026-11-24T07:00:00Z', symbol: '002378', name: '章源钨业',
+    direction: 'bullish', thesis: '钨价上涨', confidence: 0.75,
+    evidence: [{ text: '钨价从去年就开始涨', type: 'fact' }],
+    invalidation: ['钨价跌回去年年底的水平'],
+  }]);
+  assert.match(html, /75%/);
+  assert.match(html, /钨价跌回去年年底的水平/);
+  assert.match(html, /依据 1 条/);
+});
+
 test('renderObservationRows puts the kernel row id on the delete button', () => {
   const html = renderObservationRows([
     { id: 'obs_1', created_at: '2026-11-24T07:00:00Z', symbol: '002378', thesis: 't' },

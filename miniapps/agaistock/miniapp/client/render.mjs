@@ -33,10 +33,13 @@ export function renderReviews(reviews) {
         ${f.suggested_fix ? `<div class="finding-fix">建议：${escapeHtml(f.suggested_fix)}</div>` : ''}
       </li>`).join('');
 
+    // 「采纳」暂时禁用：采纳要写入 observation.invalidation，而观察记录只追加不修改，
+    // 需要观察版本链（新版本行 + supersedes_id）—— 当前存储模型还没有版本链。
+    // 一个点了没反应的按钮比一个明确禁用的按钮更糟，所以先禁用 + 说明。
     const invalidations = (review.proposed_invalidation || []).map((p) => `
       <li class="invalidation">
         <span>${escapeHtml(p.desc)}</span>
-        <button type="button" data-adopt-invalidation="${escapeHtml(p.desc)}">采纳</button>
+        <button type="button" data-adopt-invalidation="${escapeHtml(p.desc)}" disabled title="采纳需要观察版本链，本轮未实现">采纳</button>
       </li>`).join('');
 
     const caveats = (review.caveats || []).map((c) => `<li>${escapeHtml(c)}</li>`).join('');
@@ -126,11 +129,14 @@ export function renderObservationRows(items) {
       : (item.created_at || '');
     const dir = 'dir-' + (item.direction || 'neutral');
     const label = DIRECTION_LABEL[item.direction] || item.direction || '中性';
+    const evidence = Array.isArray(item.evidence) ? item.evidence : [];
     const invalidation = Array.isArray(item.invalidation) ? item.invalidation : [];
     return '<tr>'
       + '<td class="num">' + escapeHtml(timeText) + '</td>'
       + '<td class="num">' + escapeHtml((item.symbol || '—') + (item.name ? ' ' + item.name : '')) + '</td>'
-      + '<td>' + escapeHtml(item.thesis || '（未提取）') + '</td>'
+      + '<td>' + escapeHtml(item.thesis || '（未提取）')
+      + (evidence.length ? '<div class="sub">依据 ' + evidence.length + ' 条</div>' : '')
+      + '</td>'
       + '<td><span class="tag ' + dir + '">' + escapeHtml(label) + '</span></td>'
       + '<td class="num">' + Math.round((item.confidence || 0) * 100) + '%</td>'
       + '<td>' + (invalidation.length

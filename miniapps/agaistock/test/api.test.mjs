@@ -111,6 +111,22 @@ test('POST /api/review forwards symbol, name and text to kernel', async () => {
   assert.ok(args.includes('还能拿半年'));
 });
 
+test('POST /api/review forwards the structured observation to the kernel', async () => {
+  const response = new FakeResponse();
+  const kernel = fakeKernel({ observation_id: 'obs_9', reviews: [], score: {}, horizon: {} });
+  await handleRoute(
+    makeRequest('POST', '/api/review', {
+      symbol: '002378', name: '章源钨业', text: '还能拿半年',
+      observation: { confidence: 0.75, invalidation: ['钨价跌回去年年底的水平'] },
+    }),
+    response,
+    { kernel, dbPath: 'test.db', dataDir: '' },
+  );
+  assert.equal(response.statusCode, 200);
+  const args = kernel.calls[0];
+  assert.ok(args.includes('--observation-file'), '必须把结构化观察传给内核');
+});
+
 test('POST /api/review returns 422 when kernel fails', async () => {
   const response = new FakeResponse();
   const kernel = async () => ({ code: 1, stdout: '', stderr: 'boom' });

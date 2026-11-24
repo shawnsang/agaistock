@@ -103,7 +103,7 @@
 |---|---|
 | **不输出自由文本作为主要结论** | 自由文本无法聚合评分、无法做统计、无法累积认知档案（主规格 §5.2 已有此结论） |
 | **每条 finding 必须有 `dimension` + `delta`** | 评分聚合完全依赖这两个字段；缺失即视为该点评师输出不合法 |
-| **`dimension` 必须是已定义维度** | 评分口径跨期可比的前提。新增维度必须显式改 `config/scoring.yaml`，不允许隐式扩张（见 §5.1） |
+| **`dimension` 必须是已定义维度** | 评分口径跨期可比的前提。新增维度必须显式改 `config/scoring.json`，不允许隐式扩张（见 §5.1） |
 | **`caveats` 不得为空（若有适用纪律）** | 限制声明缺失 = 把机械结论当结论，是本产品最容易产生的误导 |
 | **`proposed_invalidation` 不得直接写进 observation** | 用户口述的证伪条件是用户自己的判断标准，被点评师改写会破坏校准统计的归因（主规格 §5.5） |
 
@@ -164,18 +164,24 @@ D:\workroom\agaistock\
 
 ### 3.2 注册表
 
-静态注册表（`src/agaistock/reviewers/registry.py`）。每个点评师在 `config/reviewers.yaml` 声明：
+静态注册表（`src/agaistock/reviewers/registry.py`）。每个点评师在 `config/reviewers.json` 声明：
 
-```yaml
-reviewers:
-  - id: anchor-chanlun
-    enabled: true
-    module: skills.anchor_chanlun.reviewer
-    weight: 1.0          # 该点评师在其贡献维度内的相对权重
-    requires: [tdx_kline]
+```json
+{
+  "reviewers": [
+    {
+      "id": "anchor-chanlun",
+      "enabled": true,
+      "module": "agaistock.skills.anchor_chanlun.reviewer",
+      "weight": 1.0
+    }
+  ]
+}
 ```
 
-**`weight` 的语义**：点评师在某维度内贡献 `delta` 时乘上的系数。同一维度有多家点评师时，各自 `delta × weight` 后归一化。这样某位点评师可以"轻一点"（例如 `audit-timing` 只提供参考）而不改维度本身的权重。
+> **配置用 JSON 不用 YAML**（主规格 D4）：业务内核零第三方依赖，YAML 要 PyYAML。
+> `module` 是相对于 `agaistock` 包根的模块路径。
+> `weight` 的语义：点评师在某维度内贡献 `delta` 时乘上的系数。同一维度有多家点评师时，各自 `delta × weight` 后归一化。这样某位点评师可以"轻一点"（例如 `audit-timing` 只提供参考）而不改维度本身的权重。
 
 ### 3.3 生命周期
 
@@ -194,6 +200,36 @@ horizon.plan(observation_id)        ← 读 horizon_hint + proposed_invalidation
 ```
 
 **每个点评师的失败都被隔离**：一位点评师挂了，观察仍有评分（该维度按剩余点评师归一化），并在 UI 上明确显示"该点评师未成功运行"。
+
+### 3.4 结构化观察的数据流（接入层 → 内核）
+
+**观察卡是由「接入层」解析出来的，不是内核解析的。** 内核只接收已经结构化的观察，
+不自己猜用户说了什么：
+
+```
+用户口述
+   ↓
+接入层（Mini App 的 LLM 层）解析
+   ↓  结构化草稿：symbol / name / thesis / direction / confidence /
+   ↓              evidence[] / invalidation[] / position / timeframe / trigger
+   ↓
+内核接收并**逐字段校验**（不信模型输出的每一个字段）
+   ↓
+observations 表落库
+   ↓
+点评师拿结构化观察去对照客观结构
+```
+
+- **草稿经文件传给内核**（`--observation-file <path>`），不拼在命令行里 ——
+  口述原文可能很长，Windows 命令行长度有上限。
+- **内核逐字段校验**：方向只认 `bullish/bearish/neutral`；信心夹到 `[0,1]`；
+  `evidence[].type` 只认 `fact/assumption`；证伪条件只留非空字符串。
+  不合法的字段**退回关键词解析**的结果，不让脏数据进库。
+- **没有草稿时**（直接用 CLI 记录）退回关键词启发式解析，`confidence` 为 0，
+  且 UI 要显示「未提取」而不是假装有值。
+- **落库的观察必须保留用户的原始口径**：信心、依据、用户自己说的证伪条件 ——
+  这是后面「认知档案 / 校准统计」唯一能用的输入。**接入层解析出来的结构化结果
+  不能在中途被丢掉**（这是 2026-11-24 端到端实测发现的真实缺陷）。
 
 ---
 
@@ -248,7 +284,7 @@ CREATE INDEX idx_reviews_obs ON reviews(observation_id, reviewer_id, ran_at);
 | 位置与时机 | 15% | `anchor-chanlun` |
 | 一致性 | 15% | （下一轮：`audit-consistency`） |
 
-**新增维度必须显式改 `config/scoring.yaml`。** 理由：主规格 §5.6 的 Brier 校准统计要求跨期可比；若点评师可以随意引入新维度，早期观察与后期观察的分数就不可比，校准曲线失去意义。
+**新增维度必须显式改 `config/scoring.json`。** 理由：主规格 §5.6 的 Brier 校准统计要求跨期可比；若点评师可以随意引入新维度，早期观察与后期观察的分数就不可比，校准曲线失去意义。
 
 ### 5.2 聚合算法
 
@@ -339,6 +375,11 @@ UI 展示为「建议的证伪条件」+ 「采纳」按钮
 ```
 
 **点评师不自动写入。** 理由：用户的证伪条件是用户自己的判断标准；被工具改写会破坏归因 —— 到期时无法区分"判断错了"和"标准被换了"。
+
+> **当前实现（2026-11-24）**：「采纳」按钮暂时**禁用**。观察记录目前没有版本链
+> （`supersedes_id`），而采纳会修改已存在的观察记录 —— 与「观察记录只追加不修改」
+> 的不变量冲突。下一轮补观察版本链时再启用。点评师的 `proposed_invalidation`
+> 依然**不会自动写入** observation（§2.2 硬约束），这一点不变。
 
 ---
 
@@ -599,8 +640,8 @@ ReviewVerdict
 | 缠论结构被当成结论 | 用户把机械结论当买卖依据 | `caveats` 强制随结论落库；措辞层禁止软化/强化判定；UI 显著呈现限制 |
 | 上游脚本升级不兼容 | 缠论结论出错 | 上游**整目录拷贝**并标注版本；`vendor/` 下不改一行；新增/改动走独立适配层 |
 | 东财限流 | 降级链断裂 | 主源 TDX（平台托管、无 IP 限流问题）；em 仅作降级；命中限流立即换源不重试 |
-| 点评师权重失衡 | 某位点评师主导评分 | 权重写在 `config/reviewers.yaml`，可审计；`score_breakdown` 显示每位贡献 |
-| 维度被点评师撑爆 | 跨期不可比 | 维度集合固定在 `config/scoring.yaml`，新增需显式改配置 |
+| 点评师权重失衡 | 某位点评师主导评分 | 权重写在 `config/reviewers.json`，可审计；`score_breakdown` 显示每位贡献 |
+| 维度被点评师撑爆 | 跨期不可比 | 维度集合固定在 `config/scoring.json`，新增需显式改配置 |
 | LLM 篡改判定 | 结论不可信 | 归一化层校验受保护字段，篡改即丢弃 |
 | 缠论分析慢（拉三级别 K 线 + Python 计算） | 保存体验卡 | 点评异步执行；UI 显示"点评中"；观察卡先落盘，不阻塞保存 |
 
@@ -626,7 +667,7 @@ ReviewVerdict
 - [ ] `src/agaistock/storage/db.py`（`reviews` 表 + `deleted_at`）
 - [ ] `src/agaistock/scoring.py`（维度聚合 + `completeness`）
 - [ ] `src/agaistock/horizon.py`（档位上限 + checks）
-- [ ] `config/reviewers.yaml`、`config/scoring.yaml`
+- [ ] `config/reviewers.json`、`config/scoring.json`
 - [ ] Mini App：点评展示 + 评分展示 + 删除（草稿清空 / 观察软删）
 - [ ] 单测：适配器 / 规则层 / 契约 / 评分 / 观察期
 - [ ] 端到端实测（002378）
