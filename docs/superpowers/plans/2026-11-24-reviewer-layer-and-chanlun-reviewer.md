@@ -6294,7 +6294,7 @@ Expected: runtime `running`，open 成功。
 
 1. 填入口述文本：`章源钨业我看了三年了，钨价从去年就开始涨，公司储量排前列，明年上半年产量能翻倍。我觉得还能拿半年。`
 2. 点击「解析成观察卡」→ 确认观察卡渲染正常
-3. 点击「存进观察库」→ 确认：
+3. 点击「保存并点评」→ 确认：
    - 「点评师意见」区出现 `anchor-chanlun`
    - 至少 1 条 finding，且显示 `dimension` 与 `delta`
    - 「建议的证伪条件」区块：本轮结构识别出了中枢就出现且带「采纳」按钮；
@@ -6351,6 +6351,605 @@ git commit -m "docs: record end-to-end verification results for reviewer layer"
 
 > **不要用 `git add -A`**（Global Constraint 14）：实测过程中可能有并行子代理的中间文件，
 > 一把全加会把别人的半成品一起提交。只 add 上面这两个路径。
+
+> **实测前置**：本任务的 Step 2/3/4 必须在 **Task 17** 之后跑。
+> 首次实测（2026-11-24）暴露了两个阻塞缺陷 —— 安装后的插件包**不含 Python 内核**，
+> 且 `server.mjs` 的内核桥接路径在「插件不在仓库里」时全部落空，
+> 内核失败还被吞成「观察库为空」。这两个缺陷的修复见 Task 17。
+
+---
+
+### Task 17: Mini App 安装包自包含 —— 内核随包走 + 内核桥接路径与失败可见性
+
+> **来源**：Task 16（端到端实测）实测暴露的两个阻塞缺陷。
+> 这个任务不新增业务能力，只让**已实现的能力在交付形态下真的能用**。
+
+**缺陷一（Critical）：安装后的插件包里没有 Python 内核。**
+
+宿主安装的是**整个 Mini App 包目录**（`miniapps/agaistock/`），安装后
+`~/.minimax/plugins/agaistock/` 就是运行时的代码根。但包里只有
+`miniapp/`（页面 + Node 入口）、`test/`、`package.json`、`icon.png` ——
+**没有 `src/agaistock`，也没有 `config/`**。
+
+于是 `python -m agaistock.cli` 在开发机能跑通，**只因为本机做过 editable 安装**
+（`pip show agaistock` → `Location: ...\site-packages`，模块实际指向
+`D:\workroom\agaistock\src\agaistock`）。换一台机器、或仓库挪个位置，
+这个 import 立刻失效 —— 点评、评分、观察期全部不可用。
+
+> **还有一个更隐蔽的坑**：editable 安装注册的是 **meta-path finder**，
+> 优先级**高于** `PYTHONPATH`。实测：不加 `python -S` 时，即使 `PYTHONPATH`
+> 指向插件自带的 `src`，`import agaistock` 命中的仍是 editable 安装那份。
+> 所以「把内核复制进包里」必须配 `python -S` 才算数 ——
+> `-S` 禁用 site-packages，既保证用包内那份，也把
+> 「业务内核零第三方依赖」（Global Constraint 2）变成运行时硬约束。
+
+**缺陷二（Critical）：内核桥接的路径推导只在「插件位于仓库内」时成立。**
+
+`server.mjs` 原来写死：
+
+```javascript
+const REPO_ROOT = join(import.meta.dirname, '..', '..', '..', '..');
+```
+
+「向上 4 级」隐含了「插件根正好在仓库根下两层」这个前提。工作区里成立
+（`miniapps/agaistock/miniapp/node` → 仓库根），**安装后不成立**：
+`~/.minimax/plugins/agaistock/miniapp/node` 向上 4 级落到 `~/.minimax`，
+于是 `PYTHONPATH=~/.minimax/src` 与 `DEFAULT_DB=~/.minimax/data/agaistock.db`
+全部指向不存在的目录。实测安装副本里的 `GET /api/observations` 返回
+`{"ok":true,"items":[]}` —— **内核根本没跑起来，界面却显示「一条观察都没有」。**
+
+**缺陷三（Important）：内核失败被吞成「空列表」。**
+
+`/api/observations` 不检查内核退出码，`stdout` 为空就得到 `items: []`。
+用户看到的是「没有观察记录」，真实原因（Python 缺失 / 内核崩了 / 库打不开）
+被彻底吞掉。`countObservations` 更进一步：内核不可用时**回落到旧 JSON 文件观察库**，
+于是头部徽标显示 2 条、表格却显示 0 条，两个数字互相打架。
+
+**Files:**
+- Create: `tools/sync-kernel.py`（内核同步脚本）
+- Create: `miniapps/agaistock/src/agaistock/**`（内核副本，由脚本生成）
+- Create: `miniapps/agaistock/config/scoring.json`、`miniapps/agaistock/config/reviewers.json`（配置副本，由脚本生成）
+- Create: `tests/test_kernel_vendor.py`（漂移守卫 + 自包含性测试）
+- Modify: `miniapps/agaistock/miniapp/node/server.mjs`
+- Modify: `miniapps/agaistock/miniapp/client/index.html`
+- Modify: `miniapps/agaistock/test/api.test.mjs`
+
+**Interfaces:**
+- Consumes: `src/agaistock/**`、`config/*.json`（仓库内的权威副本）
+- Produces:
+  - `tools/sync-kernel.py [--check]` —— 同步 / 校验内核副本
+  - `server.mjs` 导出 `runKernel(args, options)`，`options = {cwd, pythonPath, dbPath}`
+
+> **为什么不把内核「搬进」插件包（改 `src/` 的位置）**：那会连带改
+> `pyproject.toml`、editable 安装、`config.repo_root()` 语义、`data/` 位置，
+> 以及计划与交接文档里成百上千处 `src/agaistock/...` 路径引用 ——
+> 在 16 个任务全部落地、138 条 Python 测试全绿之后做这种大重构，风险远大于收益。
+> **复制 + 漂移守卫**沿用本项目已有的上游 vendor 约定
+> （`skills/anchor_chanlun/vendor/chanlun-core/**` 就是整目录拷贝 + SHA-256 一致性校验）。
+
+- [ ] **Step 1: 写内核同步脚本 `tools/sync-kernel.py`**
+
+```python
+"""把业务内核同步进 Mini App 包，让安装包自带内核。
+
+宿主安装的是**整个 Mini App 包目录**（`miniapps/agaistock/`），安装后的目录
+就是运行时的代码根。安装副本里必须带着 `src/agaistock` 与 `config/`，
+否则 `python -m agaistock.cli` 只在开发机（editable 安装）下能跑，
+交付到用户机器上必然 ModuleNotFoundError。
+
+用法：
+    python tools/sync-kernel.py          # 同步（覆盖副本）
+    python tools/sync-kernel.py --check  # 只检查漂移，有漂移则退出码 1
+
+`tests/test_kernel_vendor.py` 会调用 --check，把漂移变成测试失败。
+"""
+from __future__ import annotations
+
+import filecmp
+import shutil
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = ROOT / "miniapps" / "agaistock"
+
+# (源目录, 副本目录) —— 副本必须与源逐字节相同。
+PAIRS = (
+    (ROOT / "src" / "agaistock", PLUGIN_ROOT / "src" / "agaistock"),
+    (ROOT / "config", PLUGIN_ROOT / "config"),
+)
+
+IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
+
+
+def _rel_files(base: Path) -> set[str]:
+    return {
+        str(p.relative_to(base)).replace("\\", "/")
+        for p in base.rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"
+    }
+
+
+def diff() -> list[str]:
+    """返回漂移描述列表；空列表表示没有漂移。"""
+    problems: list[str] = []
+    for src, dst in PAIRS:
+        if not src.is_dir():
+            problems.append(f"源目录不存在：{src}")
+            continue
+        if not dst.is_dir():
+            problems.append(f"副本目录不存在：{dst}（跑 python tools/sync-kernel.py 修复）")
+            continue
+        src_files = _rel_files(src)
+        dst_files = _rel_files(dst)
+        for missing in sorted(src_files - dst_files):
+            problems.append(f"副本缺少文件：{dst / missing}")
+        for extra in sorted(dst_files - src_files):
+            problems.append(f"副本多出文件：{dst / extra}")
+        for name in sorted(src_files & dst_files):
+            if not filecmp.cmp(src / name, dst / name, shallow=False):
+                problems.append(f"副本内容不一致：{dst / name}")
+    return problems
+
+
+def sync() -> None:
+    for src, dst in PAIRS:
+        shutil.copytree(src, dst, dirs_exist_ok=True, ignore=IGNORE)
+
+
+def main(argv: list[str]) -> int:
+    if "--check" in argv:
+        problems = diff()
+        if problems:
+            print("内核副本与源不一致：")
+            for item in problems:
+                print(f"  - {item}")
+            print("修复：python tools/sync-kernel.py")
+            return 1
+        print("内核副本与源一致。")
+        return 0
+    sync()
+    print("已同步内核到 Mini App 包。")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+```
+
+- [ ] **Step 2: 生成内核副本**
+
+```bash
+python tools/sync-kernel.py
+python tools/sync-kernel.py --check
+```
+
+Expected: 第一条输出「已同步内核到 Mini App 包。」；第二条输出「内核副本与源一致。」，退出码 0。
+
+生成后 `miniapps/agaistock/src/agaistock/` 与 `miniapps/agaistock/config/` 必须存在，
+且**不含** `__pycache__` 与 `*.pyc`。
+
+- [ ] **Step 3: 写漂移守卫与自包含性测试 `tests/test_kernel_vendor.py`**
+
+```python
+"""内核随包走的漂移守卫。
+
+宿主安装的是整个 Mini App 包目录，所以 `miniapps/agaistock/src/agaistock` 与
+`miniapps/agaistock/config` 必须是仓库里 `src/agaistock`、`config` 的**逐字节副本**。
+副本漂了就等于交付了一个和仓库不一致的内核 —— 开发机上 CLI 用新内核、
+安装后的 Mini App 用旧内核，两边行为不一致。
+
+修法：python tools/sync-kernel.py
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = ROOT / "miniapps" / "agaistock"
+SYNC = ROOT / "tools" / "sync-kernel.py"
+
+
+class KernelVendorTest(unittest.TestCase):
+    def test_vendored_kernel_matches_source(self):
+        result = subprocess.run(
+            [sys.executable, str(SYNC), "--check"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            "内核副本与源不一致：\n" + result.stdout + result.stderr
+            + "\n修复：python tools/sync-kernel.py",
+        )
+
+    def test_vendored_kernel_is_self_contained(self):
+        """用插件根当 cwd、插件内 src 当 PYTHONPATH，必须能独立跑起来。
+
+        这正是安装后的运行方式：PYTHONPATH 指向插件自己的 src，
+        config 也从插件根读。不依赖 editable 安装。
+
+        **必须带 `-S`**：editable 安装注册的是 meta-path finder，优先级高于
+        PYTHONPATH —— 不带 `-S` 时这里会命中仓库里那份，测了个寂寞。
+        """
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(PLUGIN_ROOT / "src")
+        env.pop("AGAISTOCK_DB", None)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                "-c",
+                "import agaistock, agaistock.config as c;"
+                "print(agaistock.__file__);"
+                "print(c.repo_root());"
+                "print(len(c.load_scoring()['dimensions']))",
+            ],
+            cwd=PLUGIN_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        self.assertGreaterEqual(len(lines), 3, result.stdout)
+        # 必须导入的是插件里的那份副本，不是仓库里的 editable 安装
+        self.assertIn("miniapps", lines[0], result.stdout)
+        self.assertNotIn("site-packages", lines[0], result.stdout)
+        # repo_root 必须落在插件根上，配置才能从插件内读到
+        self.assertEqual(Path(lines[1]).resolve(), PLUGIN_ROOT.resolve(), result.stdout)
+        # 五个评分维度必须读得到
+        self.assertEqual(lines[2].strip(), "5", result.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 4: 改 `server.mjs` 的路径推导与内核调用**
+
+**4.1** 把模块顶层的常量改成按**插件根**推导：
+
+```javascript
+// 插件根：<plugin>/miniapp/node -> <plugin>/miniapp -> <plugin>
+// **不能**用「向上 4 级」：那只在插件位于仓库内时成立。安装后插件根在
+// ~/.minimax/plugins/<id>/，向上 4 级会落到插件目录之外，内核与配置全找不到。
+const PLUGIN_ROOT = join(import.meta.dirname, '..', '..');
+const KERNEL_SRC = join(PLUGIN_ROOT, 'src');
+const KERNEL_TIMEOUT_MS = 180000;
+```
+
+（删掉原来的 `REPO_ROOT` 与 `DEFAULT_DB` 两行。`DEFAULT_DB` 的职责改由
+`start()` 从宿主给的 `context.dataDir` 决定 —— 运行数据属于运行时，不属于安装产物。）
+
+**4.2** `runKernel` 接受可注入的运行参数：
+
+```javascript
+export function runKernel(args, options = {}) {
+  const cwd = options.cwd || PLUGIN_ROOT;
+  const pythonPath = options.pythonPath || KERNEL_SRC;
+  const dbPath = options.dbPath || '';
+  return new Promise((resolve) => {
+    const env = { ...process.env, PYTHONPATH: pythonPath };
+    if (dbPath) env.AGAISTOCK_DB = dbPath;
+    // **必须带 `-S`**：editable 安装（`pip install -e .`）注册的是 meta-path finder，
+    // 优先级**高于** PYTHONPATH —— 实测开发机上不加 `-S` 时 `import agaistock`
+    // 命中的是仓库里那份，不是插件自带的副本，自包含就成了空话。
+    // `-S` 同时禁用 site-packages，正好把「业务内核零第三方依赖」（Global Constraint 2）
+    // 从约定变成运行时硬约束：内核一旦依赖第三方包，Mini App 会立刻报错而不是
+    // 悄悄依赖用户机器上的环境。
+    const child = spawn('python', ['-S', '-m', 'agaistock.cli', ...args], {
+      cwd,
+      env,
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({ code: -1, stdout, stderr: `内核调用超时（${KERNEL_TIMEOUT_MS}ms）` });
+    }, KERNEL_TIMEOUT_MS);
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      finish({ code: -1, stdout: '', stderr: String(error.message) });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      finish({ code: code ?? -1, stdout, stderr });
+    });
+  });
+}
+```
+
+**4.3** `handleRoute` 的 `dbPath` 默认值改成空串（不再有插件内的默认库）：
+
+```javascript
+    kernel = runKernel,
+    dbPath = '',
+  } = options;
+```
+
+**4.4** `start()` 用宿主给的 `pluginRoot` 与 `dataDir`：
+
+```javascript
+export async function start(context) {
+  const dataDir = context.dataDir;
+  await mkdir(dataDir, { recursive: true });
+  const observationsPath = join(dataDir, OBSERVATIONS_FILE);
+  // 宿主给的 pluginRoot 才是权威；模块层级的推导只是兜底。
+  const pluginRoot = context.pluginRoot || PLUGIN_ROOT;
+  const clientEntry = await readFile(join(pluginRoot, 'miniapp/client/index.html'));
+```
+
+紧接着读渲染模块的那段（Task 14 fix 加的）里的路径也要换成 `pluginRoot`：
+
+```javascript
+  let renderModule = '';
+  try {
+    renderModule = await readFile(join(pluginRoot, 'miniapp/client/render.mjs'), 'utf8');
+  } catch {
+    renderModule = '';
+  }
+```
+
+在 `createServer` 之前绑定内核与库路径：
+
+```javascript
+  // 运行数据落宿主给的数据目录，**不是**插件目录 ——
+  // 插件目录是安装产物（可能被只读安装、也可能被 Host 重装覆盖），
+  // dataDir 才是运行时可写、跨重启保留的数据位置。
+  const dbPath = join(dataDir, 'agaistock.db');
+  const kernel = (args) => runKernel(args, {
+    cwd: pluginRoot,
+    pythonPath: join(pluginRoot, 'src'),
+    dbPath,
+  });
+
+  const server = createServer((request, response) => {
+    void handleRoute(request, response, {
+      context,
+      clientEntry,
+      renderModule,
+      readObservations,
+      writeObservations,
+      parseObservation,
+      kernel,
+      dbPath,
+    }).catch(() => {
+      if (!response.headersSent) sendJson(response, 500, { error: 'internal_error' });
+    });
+  });
+```
+
+- [ ] **Step 5: 让内核失败可见（`server.mjs`）**
+
+**5.1** `/api/observations` 不再把内核失败吞成空列表：
+
+```javascript
+  if (request.method === 'GET' && url.pathname === '/api/observations') {
+    // 观察库以内核为准（删除也走内核，行 id 必须是内核行 id）
+    const result = await kernel(['list', '--db', dbPath, '--json']);
+    if (result.code !== 0) {
+      // 内核不可用 ≠ 没有观察记录。返回空列表会让用户以为「一条都没有」，
+      // 真实原因（Python 缺失 / 内核崩了 / 库打不开）被彻底吞掉。
+      sendJson(response, 500, {
+        ok: false,
+        error: 'KERNEL_FAILED',
+        message: (result.stderr || `exit=${result.code}`).slice(-500),
+      });
+      return;
+    }
+    const payload = parseKernelJson(result.stdout);
+    const items = Array.isArray(payload)
+      ? payload
+      : (payload && Array.isArray(payload.items) ? payload.items : []);
+    // 前端读的是 data.items —— 这里必须保持 {ok, items} 外壳
+    sendJson(response, 200, { ok: true, items });
+    return;
+  }
+```
+
+**5.2** `/api/observations/:id/reviews` 同样检查退出码：
+
+```javascript
+  if (request.method === 'GET' && url.pathname.endsWith('/reviews')) {
+    const id = decodeURIComponent(url.pathname.slice('/api/observations/'.length, -'/reviews'.length));
+    const result = await kernel(['reviews', id, '--db', dbPath, '--json']);
+    if (result.code !== 0) {
+      sendJson(response, 500, {
+        ok: false,
+        error: 'KERNEL_FAILED',
+        message: (result.stderr || `exit=${result.code}`).slice(-500),
+      });
+      return;
+    }
+    const payload = parseKernelJson(result.stdout);
+    sendJson(response, 200, payload ?? { observation_id: id, items: [] });
+    return;
+  }
+```
+
+**5.3** `countObservations` 去掉旧 JSON 观察库的回落（Task 14 起观察库一律以内核为准，
+回落会让徽标数字与表格数字互相打架）：
+
+```javascript
+async function countObservations(kernel, dbPath) {
+  const result = await kernel(['list', '--db', dbPath, '--json']);
+  if (result.code !== 0) return null;
+  const payload = parseKernelJson(result.stdout);
+  if (payload && Array.isArray(payload.items)) return payload.items.length;
+  return null;
+}
+```
+
+`/api/status` 里的调用改成 `await countObservations(kernel, dbPath)`，
+并把返回值原样放进 `observationCount`（内核不可用时是 `null`，不是 0）。
+
+- [ ] **Step 6: 前端显示「内核不可用」（`index.html`）**
+
+**6.1** `refreshStatus` 里不要把 `null` 变成 0：
+
+```javascript
+              runtimeState.count = data.observationCount === null ? null : (data.observationCount || 0);
+```
+
+**6.2** `renderChip` 里 `null` 显示「不可用」：
+
+```javascript
+        function renderChip() {
+          var speech = runtimeState.speech;
+          var agent = runtimeState.agent;
+          runtimeChip.textContent =
+            (speech === true ? '语音可用' : speech === false ? '语音不可用' : '语音状态未知') + ' · ' +
+            (agent === true ? 'Agent 可用' : agent === false ? 'Agent 不可用' : 'Agent 状态未知') +
+            ' · ' + (runtimeState.count === null ? '观察库不可用' : '已存 ' + runtimeState.count + ' 条');
+        }
+```
+
+**6.3** `loadObservations` 在 `ok === false` 时显示原因而不是空表格：
+
+```javascript
+            .then(function (data) {
+              if (data && data.ok === false) {
+                // 内核不可用：必须显示原因，不能显示成「一条观察都没有」。
+                obsCount.textContent = '不可用';
+                runtimeState.count = null;
+                renderChip();
+                obsEmpty.classList.remove('hidden');
+                obsEmpty.textContent = '观察库不可用：' + (data.message || data.error || '未知原因');
+                obsTableWrap.classList.add('hidden');
+                return;
+              }
+              var items = (data && data.items) || [];
+              obsCount.textContent = items.length;
+              runtimeState.count = items.length;
+              renderChip();
+              if (!items.length) {
+                obsEmpty.classList.remove('hidden');
+                obsTableWrap.classList.add('hidden');
+                return;
+              }
+              obsEmpty.classList.add('hidden');
+              obsTableWrap.classList.remove('hidden');
+              // Task 14 之后 /api/observations 返回的是内核行（不是旧的 {createdAt, draft}）。
+              var render = window.agaistockRender;
+              if (!render) {
+                obsEmpty.classList.remove('hidden');
+                obsTableWrap.classList.add('hidden');
+                setStatus(recordStatus, '前端渲染模块未加载，观察库表格无法显示。', 'error');
+                return;
+              }
+              obsRows.innerHTML = render.renderObservationRows(items);
+            })
+```
+
+- [ ] **Step 7: 补 Node 测试（`api.test.mjs`）**
+
+加三条：
+
+```javascript
+test('GET /api/observations returns 500 when the kernel fails', async () => {
+  const response = new FakeResponse();
+  const kernel = async () => ({ code: 1, stdout: '', stderr: 'ModuleNotFoundError: agaistock' });
+  await handleRoute(
+    makeRequest('GET', '/api/observations'),
+    response,
+    { kernel, dbPath: 'test.db' },
+  );
+  // 内核不可用不能伪装成「一条观察都没有」
+  assert.equal(response.statusCode, 500);
+  assert.equal(response.json().ok, false);
+  assert.match(response.json().message, /ModuleNotFoundError/);
+});
+
+test('GET /api/observations/:id/reviews returns 500 when the kernel fails', async () => {
+  const response = new FakeResponse();
+  const kernel = async () => ({ code: 1, stdout: '', stderr: '内核炸了' });
+  await handleRoute(
+    makeRequest('GET', '/api/observations/obs_1/reviews'),
+    response,
+    { kernel, dbPath: 'test.db' },
+  );
+  assert.equal(response.statusCode, 500);
+  assert.equal(response.json().ok, false);
+});
+
+test('runKernel resolves the kernel from the plugin bundle, not the repo', () => {
+  // 插件根 = <plugin>/miniapp/node 向上两级；内核必须在插件自带的 src 里。
+  const source = readFileSync(
+    join(import.meta.dirname, '..', 'miniapp', 'node', 'server.mjs'),
+    'utf8',
+  );
+  assert.match(source, /const PLUGIN_ROOT = join\(import\.meta\.dirname, '\.\.', '\.\.'\)/);
+  assert.match(source, /const KERNEL_SRC = join\(PLUGIN_ROOT, 'src'\)/);
+});
+```
+
+第三条需要补 import：
+
+```javascript
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+```
+
+> 第三条是**防回归**的静态断言：把 `PLUGIN_ROOT` 改回「向上 4 级」时它必须失败。
+> 路径推导错了不会让任何运行时单测变红（单测不走真实内核），只能这样钉住。
+
+- [ ] **Step 8: 跑测试确认通过**
+
+```bash
+node --test "miniapps/agaistock/test/*.test.mjs"
+python -m unittest discover -s tests -t .
+```
+
+Expected: Node 48 通过（pipeline 23 + render 10 + api 15）；Python 140 通过（138 + 2）。
+
+> `node --test` **必须用 glob 形式**：目录形式在本机会报
+> `Cannot find module ...\miniapps\agaistock\test`。
+
+- [ ] **Step 9: 发布并在安装副本上验收**
+
+```
+miniapp { action: "publish", pluginId: "agaistock" }
+miniapp { action: "open",    pluginId: "agaistock" }
+```
+
+然后在页面上下文里验：
+
+1. `GET /render.mjs` → 200
+2. `GET /api/observations` → **不是** `items: []` 静默空，而是要么真实数据、要么带 `ok:false` 的明确错误
+3. 头部徽标显示「已存 N 条」或「观察库不可用」，**不能**是「已存 0 条」而表格空白
+
+**关键验收**：把安装副本里的 `miniapps/agaistock/src` 临时改名，确认界面**立刻显示错误**
+而不是「空观察库」；改回来确认恢复。这条验的是「失败可见」，不是「功能正常」。
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add tools/sync-kernel.py tests/test_kernel_vendor.py miniapps/agaistock/src miniapps/agaistock/config miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/miniapp/client/index.html miniapps/agaistock/test/api.test.mjs
+git commit -m "feat: ship the kernel inside the mini app bundle and surface kernel failures" -- tools/sync-kernel.py tests/test_kernel_vendor.py miniapps/agaistock/src miniapps/agaistock/config miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/miniapp/client/index.html miniapps/agaistock/test/api.test.mjs
+```
+
+> **必须用明确路径，不要 `git add -A`**（Global Constraint 14）。
+> `miniapps/agaistock/src` 与 `miniapps/agaistock/config` 是本轮**新增**的目录，
+> 必须显式 add 进去。
 
 ---
 
