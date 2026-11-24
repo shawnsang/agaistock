@@ -69,6 +69,21 @@ class ScoringTests(unittest.TestCase):
         entry = next(e for e in result["score_breakdown"] if e["dimension"] == "位置与时机")
         self.assertEqual(entry["contributions"][0]["finding_codes"], ["CHAN_X"])
 
+    def test_contribution_exposes_the_applied_delta_so_raw_can_be_reconciled(self):
+        # 主规格 §5.3：每一分必须可追溯到具体 Finding。
+        # 只给未缩放的 delta 时，weight != 1 的情况下展示层算不平 raw。
+        verdicts = [verdict("a", "位置与时机", -12)]
+        result = scoring.aggregate(verdicts, reviewer_weights={"a": 0.5}, dimensions=DIMENSIONS)
+        entry = next(e for e in result["score_breakdown"] if e["dimension"] == "位置与时机")
+        contribution = entry["contributions"][0]
+        self.assertEqual(contribution["delta"], -12)
+        self.assertEqual(contribution["applied_delta"], -6)
+        # raw 必须等于 100 + 各 contribution 的 applied_delta 之和
+        self.assertEqual(
+            entry["raw"],
+            100 + sum(c["applied_delta"] for c in entry["contributions"]),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

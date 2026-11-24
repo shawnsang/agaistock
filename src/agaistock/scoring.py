@@ -44,7 +44,11 @@ def aggregate(
             contributions.append({
                 "reviewer_id": verdict.reviewer_id,
                 "finding_codes": [f.code for f in matched],
+                # delta 是这条 finding 自己的分值；applied_delta 是乘上点评师权重后
+                # 真正计入 raw 的值。两者都要给：主规格 §5.3 要求「每一分必须可追溯到
+                # 具体 Finding」，展示层若只用 delta 去解释 raw，weight != 1 时算不平。
                 "delta": delta,
+                "applied_delta": delta * reviewer_weight,
                 "weight": reviewer_weight,
             })
 
