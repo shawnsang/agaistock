@@ -5408,6 +5408,38 @@ test('POST /api/save writes through the injected observation store', async () =>
 });
 ```
 
+再补两条覆盖「前端渲染模块」这一路（Task 15 把渲染逻辑拆到独立文件后，
+页面靠 `<script type="module" src="./render.mjs">` 引入；服务端不提供这条路由就会整页静默失效）：
+
+```javascript
+test('GET /render.mjs serves the front-end module with a javascript content type', async () => {
+  const response = new FakeResponse();
+  await handleRoute(
+    makeRequest('GET', '/render.mjs'),
+    response,
+    { renderModule: 'export const renderScore = () => "";\n', kernel: fakeKernel({}) },
+  );
+  assert.equal(response.statusCode, 200);
+  assert.match(response.headers['content-type'], /javascript/);
+  assert.match(response.body, /renderScore/);
+});
+
+test('GET /render.mjs returns 404 when the module was not loaded', async () => {
+  const response = new FakeResponse();
+  await handleRoute(
+    makeRequest('GET', '/render.mjs'),
+    response,
+    { kernel: fakeKernel({}) },
+  );
+  assert.equal(response.statusCode, 404);
+});
+```
+
+> 「`miniapp/client/render.mjs` 确实存在且导出了约定的四个函数」由 Task 15 的
+> `render.test.mjs` 顶住（它 `import { renderReviews, renderScore, renderHorizon, renderObservationRows } from '../miniapp/client/render.mjs'`，
+> 文件缺失时 import 直接抛错、整份测试文件全挂）。这里**不要**再重复一遍 ——
+> Task 14 排在前、文件是 Task 15 才建的，在 Task 14 里断言文件存在会让线性执行直接失败。
+
 - [ ] **Step 2: 运行测试确认失败**
 
 ```bash
@@ -5498,6 +5530,7 @@ export async function handleRoute(request, response, options = {}) {
   const {
     context = {},
     clientEntry = '',
+    renderModule = '',
     readObservations = async () => [],
     writeObservations = async () => {},
     parseObservation = async () => ({
@@ -5514,6 +5547,22 @@ export async function handleRoute(request, response, options = {}) {
   if (request.method === 'GET' && url.pathname === '/dashboard') {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(clientEntry);
+    return;
+  }
+
+  // 前端渲染模块是**第二个静态文件**（Task 15 把 render.mjs 从 index.html 里拆出来）。
+  // 宿主只把 index.html 交给 Node 进程（surface.path 是页面入口，不是静态文件服务器），
+  // server.mjs 也只路由 /dashboard 与 /api/*，其余一律 404 ——
+  // 不显式提供这条路由，浏览器里的 `<script type="module" src="./render.mjs">`
+  // 会拿到 404，window.agaistockRender 根本不存在，整页静默失效。
+  // 只白名单这一个文件，不做通用静态服务（避免路径穿越）。
+  if (request.method === 'GET' && url.pathname === '/render.mjs') {
+    if (!renderModule) {
+      sendJson(response, 404, { error: 'not_found' });
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
+    response.end(renderModule);
     return;
   }
 
@@ -5654,10 +5703,22 @@ async function countObservations(kernel, dbPath, readObservations) {
 （原来的内联 `handle` 闭包已被删除）：
 
 ```javascript
+  // Task 15 把渲染逻辑拆到 render.mjs，页面用 <script type="module" src="./render.mjs"> 引入。
+  // 宿主只把 index.html 交给 Node 进程（surface.path 是页面入口，不是静态文件服务器），
+  // 所以 render.mjs 必须由本服务自己提供，否则页面里的 module 脚本 404、整页静默失效。
+  // 读不到文件时降级成空字符串 —— 让 start() 抛错会把整个 Mini App 拖到起不来。
+  let renderModule = '';
+  try {
+    renderModule = await readFile(join(context.pluginRoot, 'miniapp/client/render.mjs'), 'utf8');
+  } catch {
+    renderModule = '';
+  }
+
   const server = createServer((request, response) => {
     void handleRoute(request, response, {
       context,
       clientEntry,
+      renderModule,
       readObservations,
       writeObservations,
       parseObservation,
@@ -5680,7 +5741,7 @@ node --test "miniapps/agaistock/test/*.test.mjs"
 > 注意：`node --test <目录>` 在本机（Node 24 + Windows）会把目录当成模块解析而报
 > `Cannot find module ...\miniapps\agaistock\test`。必须用 glob 形式。
 
-Expected: 全部 PASS —— 既有 `pipeline.test.mjs` 23 条 + 新增 `api.test.mjs` 10 条
+Expected: 全部 PASS —— 既有 `pipeline.test.mjs` 23 条 + 新增 `api.test.mjs` 12 条
 
 - [ ] **Step 5: toolAccess 保持不声明**
 
