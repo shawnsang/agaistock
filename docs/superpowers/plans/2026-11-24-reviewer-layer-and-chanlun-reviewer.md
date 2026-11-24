@@ -3561,12 +3561,24 @@ class WordingTests(unittest.TestCase):
         self.assertEqual(result[0].evidence_ref, ["chan.levels.day.signal"])
 
     def test_string_evidence_ref_is_treated_as_tampering(self):
-        # list("a") == ['a']，与原文恰好相等 → 字符串会被误判成「没篡改」而放行。
+        # list("a") → ['a']。原文的 evidence_ref 必须**恰好是** ['a']，
+        # 旧实现才会把字符串误判成「没篡改」而放行 —— 用别的原文（如
+        # ["chan.levels.day.signal"]）时 list("a") 跟它本来就不相等，
+        # 这条测试在旧实现下也会通过，等于没卡住任何东西。
         llm = FakeLlm(
             '{"items":[{"code":"CHAN_DAY_TOP_DIVERGENCE","evidence_ref":"a","claim":"改写"}]}'
         )
+        original = finding(evidence_ref=["a"])
+        result = wording.phrase([original], {"thesis": "t"}, llm=llm)
+        self.assertEqual(result[0].claim, "原始表述")
+
+    def test_unexpected_shape_in_the_llm_payload_degrades_to_the_original(self):
+        # LLM 返回的 items 里混进一个非 dict 的元素时，整个解析段都不能抛异常 ——
+        # 措辞层失败必须降级，不能影响判定。
+        llm = FakeLlm('{"items":[123, null, "oops"]}')
         result = wording.phrase([finding()], {"thesis": "t"}, llm=llm)
         self.assertEqual(result[0].claim, "原始表述")
+        self.assertEqual(result[0].delta, -12)
 
     def test_protected_fields_come_from_the_contract(self):
         # 受保护字段只能有一个来源，否则两处分叉就没人说得清「哪些字段不许 LLM 改」。
@@ -3803,28 +3815,34 @@ def phrase(
     except Exception:  # noqa: BLE001 —— 措辞层失败必须降级，不能影响判定
         return list(findings)
 
-    payload = _extract_json(raw)
-    if not payload:
+    # 从这里开始的每一步都在处理**不可信的外部输入**（LLM 的原始返回）。
+    # 任何一处意外都必须降级成规则层原文，不能让异常穿透到点评师 ——
+    # 否则整轮点评会变成 status="error"，连规则层已经算好的 findings 一起丢掉。
+    try:
+        payload = _extract_json(raw)
+        if not payload:
+            return list(findings)
+
+        items = payload.get("items")
+        if not isinstance(items, list):
+            return list(findings)
+
+        by_code = {item.get("code"): item for item in items if isinstance(item, dict)}
+
+        result = []
+        for finding in findings:
+            item = by_code.get(finding.code)
+            if not isinstance(item, dict) or not _matches_protected(finding, item):
+                result.append(finding)
+                continue
+            new_claim = str(item.get("claim") or "").strip()
+            if not new_claim:
+                result.append(finding)
+                continue
+            result.append(replace(finding, claim=new_claim))
+        return result
+    except Exception:  # noqa: BLE001 —— 措辞层失败必须降级，不能影响判定
         return list(findings)
-
-    items = payload.get("items")
-    if not isinstance(items, list):
-        return list(findings)
-
-    by_code = {item.get("code"): item for item in items if isinstance(item, dict)}
-
-    result = []
-    for finding in findings:
-        item = by_code.get(finding.code)
-        if not isinstance(item, dict) or not _matches_protected(finding, item):
-            result.append(finding)
-            continue
-        new_claim = str(item.get("claim") or "").strip()
-        if not new_claim:
-            result.append(finding)
-            continue
-        result.append(replace(finding, claim=new_claim))
-    return result
 ```
 
 同时创建空文件 `src/agaistock/llm/__init__.py`。
@@ -3835,7 +3853,7 @@ def phrase(
 python -m unittest tests.test_wording tests.test_llm_client -v
 ```
 
-Expected: 10 tests PASS
+Expected: 11 tests PASS
 
 - [ ] **Step 6: Commit**
 
