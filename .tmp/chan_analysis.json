@@ -1,0 +1,437 @@
+{
+  "level": "day",
+  "level_label": "日线",
+  "level_role": "中期战术",
+  "summary": {
+    "symbol": "current stock",
+    "last_close": 15.54,
+    "last_bar_date": "2026-11-24",
+    "data_range": [
+      "2024-11-04",
+      "2026-11-24"
+    ],
+    "kline_count": 500,
+    "merged_count": 392,
+    "generated_at": "2026-11-24T15:33:13",
+    "may_be_partial": true,
+    "data_span_days": 750,
+    "divergence_window_bars": 15,
+    "pivots_total": 3,
+    "pivots_ideal": [
+      4,
+      8
+    ],
+    "kline_ideal": [
+      250,
+      600
+    ],
+    "window_verdict": "结构充分",
+    "window_note": "500 根 K 线 / 3 个中枢，落在理想区间内"
+  },
+  "fractals": {
+    "tops": 82,
+    "bots": 82
+  },
+  "strokes_total": 34,
+  "segments_total": 12,
+  "pivots_total": 3,
+  "context": {
+    "last_close": 15.54,
+    "last_bar_date": "2026-11-24",
+    "direction": "up",
+    "bias": "down",
+    "current_leg": "down",
+    "pivot_position": "below",
+    "last_pivot": {
+      "from": "2026-02-05",
+      "to": "2026-09-22",
+      "ZG": 29.04,
+      "ZD": 22.39,
+      "extend": 0
+    },
+    "recent_divergence": {
+      "kind": "bottom",
+      "type": "底背驰",
+      "date": "2026-11-23",
+      "price": 14.71,
+      "prev_date": "2026-10-30",
+      "prev_price": 16.1,
+      "area_ratio": 0.475,
+      "active": true
+    },
+    "signal": {
+      "type": "中枢下方 · 底背驰预警",
+      "confidence": "中",
+      "basis": "价格仍在中枢之下（偏弱），但已出现底背驰，下跌动能衰减；需次级别同向背驰确认后才可视为转折",
+      "invalidation": "创新低且 MACD 柱面积同步放大则背驰被破坏"
+    },
+    "bars_after_last_divergence": 1,
+    "recent_divergence_hint": null,
+    "divergence_window_bars": 15,
+    "pivot_bands": [
+      {
+        "is_last": false,
+        "side": "below",
+        "from": "2024-12-02",
+        "to": "2025-07-10",
+        "ZD": 7.4,
+        "ZG": 7.93,
+        "amp_pct": 7.16,
+        "extend": 1,
+        "role": "支撑带",
+        "dist_pct": -48.97
+      },
+      {
+        "is_last": false,
+        "side": "below",
+        "from": "2025-08-04",
+        "to": "2026-02-05",
+        "ZD": 11.84,
+        "ZG": 14.05,
+        "amp_pct": 18.67,
+        "extend": 0,
+        "role": "支撑带",
+        "dist_pct": -9.59
+      },
+      {
+        "is_last": true,
+        "side": "above",
+        "from": "2026-02-05",
+        "to": "2026-09-22",
+        "ZD": 22.39,
+        "ZG": 29.04,
+        "amp_pct": 29.7,
+        "extend": 0,
+        "role": "最近中枢",
+        "dist_pct": 44.08
+      }
+    ],
+    "nearby_pivots": [
+      {
+        "is_last": false,
+        "side": "below",
+        "from": "2025-08-04",
+        "to": "2026-02-05",
+        "ZD": 11.84,
+        "ZG": 14.05,
+        "amp_pct": 18.67,
+        "extend": 0,
+        "role": "支撑带",
+        "dist_pct": -9.59
+      },
+      {
+        "is_last": true,
+        "side": "above",
+        "from": "2026-02-05",
+        "to": "2026-09-22",
+        "ZD": 22.39,
+        "ZG": 29.04,
+        "amp_pct": 29.7,
+        "extend": 0,
+        "role": "最近中枢",
+        "dist_pct": 44.08
+      }
+    ]
+  },
+  "recent_strokes": [
+    {
+      "date": "2025-11-28",
+      "type": "B",
+      "price": 11.84,
+      "area": 2.3419
+    },
+    {
+      "date": "2026-01-29",
+      "type": "T",
+      "price": 26.16,
+      "area": 13.3902
+    },
+    {
+      "date": "2026-02-05",
+      "type": "B",
+      "price": 21.67,
+      "area": 2.7878
+    },
+    {
+      "date": "2026-03-03",
+      "type": "T",
+      "price": 46.08,
+      "area": 11.5368
+    },
+    {
+      "date": "2026-04-03",
+      "type": "B",
+      "price": 29.6,
+      "area": 51.6478
+    },
+    {
+      "date": "2026-05-07",
+      "type": "T",
+      "price": 35.76,
+      "area": 9.8464
+    },
+    {
+      "date": "2026-05-20",
+      "type": "B",
+      "price": 27.08,
+      "area": 5.533
+    },
+    {
+      "date": "2026-06-22",
+      "type": "T",
+      "price": 40.68,
+      "area": 16.4315
+    },
+    {
+      "date": "2026-07-21",
+      "type": "B",
+      "price": 20.21,
+      "area": 30.1922
+    },
+    {
+      "date": "2026-08-10",
+      "type": "T",
+      "price": 29.04,
+      "area": 12.5518
+    },
+    {
+      "date": "2026-09-11",
+      "type": "B",
+      "price": 22.39,
+      "area": 13.0986
+    },
+    {
+      "date": "2026-09-22",
+      "type": "T",
+      "price": 24.1,
+      "area": 0.7702
+    },
+    {
+      "date": "2026-10-30",
+      "type": "B",
+      "price": 16.1,
+      "area": 6.4452
+    },
+    {
+      "date": "2026-11-05",
+      "type": "T",
+      "price": 18.79,
+      "area": 1.0512
+    },
+    {
+      "date": "2026-11-23",
+      "type": "B",
+      "price": 14.71,
+      "area": 3.0617
+    }
+  ],
+  "recent_segments": [
+    {
+      "from": "2025-07-10",
+      "to": "2025-08-04",
+      "dir": "up",
+      "low": 7.74,
+      "high": 10.0,
+      "amp_pct": 29.2
+    },
+    {
+      "from": "2025-08-04",
+      "to": "2025-09-23",
+      "dir": "up",
+      "low": 8.85,
+      "high": 16.19,
+      "amp_pct": 82.94
+    },
+    {
+      "from": "2025-09-23",
+      "to": "2025-11-28",
+      "dir": "up",
+      "low": 11.47,
+      "high": 14.05,
+      "amp_pct": 22.49
+    },
+    {
+      "from": "2025-11-28",
+      "to": "2026-02-05",
+      "dir": "up",
+      "low": 11.84,
+      "high": 26.16,
+      "amp_pct": 120.95
+    },
+    {
+      "from": "2026-02-05",
+      "to": "2026-04-03",
+      "dir": "up",
+      "low": 21.67,
+      "high": 46.08,
+      "amp_pct": 112.64
+    },
+    {
+      "from": "2026-06-22",
+      "to": "2026-08-10",
+      "dir": "down",
+      "low": 20.21,
+      "high": 40.68,
+      "amp_pct": 101.29
+    },
+    {
+      "from": "2026-08-10",
+      "to": "2026-09-22",
+      "dir": "down",
+      "low": 22.39,
+      "high": 29.04,
+      "amp_pct": 29.7
+    },
+    {
+      "from": "2026-09-22",
+      "to": "2026-11-05",
+      "dir": "down",
+      "low": 16.1,
+      "high": 24.1,
+      "amp_pct": 49.69
+    }
+  ],
+  "recent_pivots": [
+    {
+      "from": "2024-12-02",
+      "to": "2025-07-10",
+      "ZD": 7.4,
+      "ZG": 7.93,
+      "range_pct": 7.16,
+      "extend": 1,
+      "next_dir": "up"
+    },
+    {
+      "from": "2025-08-04",
+      "to": "2026-02-05",
+      "ZD": 11.84,
+      "ZG": 14.05,
+      "range_pct": 18.67,
+      "extend": 0,
+      "next_dir": "up"
+    },
+    {
+      "from": "2026-02-05",
+      "to": "2026-09-22",
+      "ZD": 22.39,
+      "ZG": 29.04,
+      "range_pct": 29.7,
+      "extend": 0,
+      "next_dir": "down"
+    }
+  ],
+  "all_pivots": [
+    {
+      "from": "2024-12-02",
+      "to": "2025-07-10",
+      "ZD": 7.4,
+      "ZG": 7.93
+    },
+    {
+      "from": "2025-08-04",
+      "to": "2026-02-05",
+      "ZD": 11.84,
+      "ZG": 14.05
+    },
+    {
+      "from": "2026-02-05",
+      "to": "2026-09-22",
+      "ZD": 22.39,
+      "ZG": 29.04
+    }
+  ],
+  "top_divergences": [
+    {
+      "date": "2025-07-25",
+      "price": 10.0,
+      "prev_date": "2025-07-03",
+      "prev_price": 8.01,
+      "area": 1.3423,
+      "prev_area": 1.067,
+      "verdict": "无背驰"
+    },
+    {
+      "date": "2025-09-03",
+      "price": 16.19,
+      "prev_date": "2025-07-25",
+      "prev_price": 10.0,
+      "area": 4.9891,
+      "prev_area": 1.3423,
+      "verdict": "无背驰"
+    },
+    {
+      "date": "2026-01-29",
+      "price": 26.16,
+      "prev_date": "2025-10-30",
+      "prev_price": 14.05,
+      "area": 13.3902,
+      "prev_area": 5.5919,
+      "verdict": "无背驰"
+    },
+    {
+      "date": "2026-03-03",
+      "price": 46.08,
+      "prev_date": "2026-01-29",
+      "prev_price": 26.16,
+      "area": 11.5368,
+      "prev_area": 13.3902,
+      "verdict": "顶背驰"
+    },
+    {
+      "date": "2026-06-22",
+      "price": 40.68,
+      "prev_date": "2026-05-07",
+      "prev_price": 35.76,
+      "area": 16.4315,
+      "prev_area": 9.8464,
+      "verdict": "无背驰"
+    }
+  ],
+  "bottom_divergences": [
+    {
+      "date": "2025-04-09",
+      "price": 5.53,
+      "prev_date": "2025-02-28",
+      "prev_price": 6.21,
+      "area": 1.434,
+      "prev_area": 0.3638,
+      "verdict": "无背驰"
+    },
+    {
+      "date": "2026-05-20",
+      "price": 27.08,
+      "prev_date": "2026-04-03",
+      "prev_price": 29.6,
+      "area": 5.533,
+      "prev_area": 51.6478,
+      "verdict": "底背驰"
+    },
+    {
+      "date": "2026-07-21",
+      "price": 20.21,
+      "prev_date": "2026-05-20",
+      "prev_price": 27.08,
+      "area": 30.1922,
+      "prev_area": 5.533,
+      "verdict": "无背驰"
+    },
+    {
+      "date": "2026-10-30",
+      "price": 16.1,
+      "prev_date": "2026-09-11",
+      "prev_price": 22.39,
+      "area": 6.4452,
+      "prev_area": 13.0986,
+      "verdict": "底背驰"
+    },
+    {
+      "date": "2026-11-23",
+      "price": 14.71,
+      "prev_date": "2026-10-30",
+      "prev_price": 16.1,
+      "area": 3.0617,
+      "prev_area": 6.4452,
+      "verdict": "底背驰"
+    }
+  ]
+}

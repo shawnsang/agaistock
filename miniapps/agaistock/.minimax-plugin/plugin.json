@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "name": "agaistock",
+  "displayName": "股票复盘教练",
+  "version": "0.1.0",
+  "description": "记录口述的股票观察，解析成结构化观察卡并归档，用于个人观察复盘与能力训练。",
+  "author": "Shawn Sang",
+  "icon": "icon.png",
+  "category": "Business",
+  "exampleQueries": [
+    "打开股票复盘教练，记录一条新的观察。",
+    "看看我最近记录的观察列表。"
+  ],
+  "apps": [],
+  "mcpServers": [],
+  "skills": []
+}

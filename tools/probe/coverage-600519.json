@@ -1,0 +1,90 @@
+{
+  "symbol": "600519",
+  "name": "贵州茅台",
+  "setcode": "1",
+  "at": "2026-11-24T07:03:05.561Z",
+  "hits": 10,
+  "total": 10,
+  "results": [
+    {
+      "id": "quotes",
+      "label": "实时行情 + 估值快照",
+      "status": "HIT",
+      "elapsed": 1461,
+      "note": "ExtInfo 内含 PE/EPS/BVPS/股息率/总市值/总股本/流通股本/换手率",
+      "error": null
+    },
+    {
+      "id": "kline-hfq",
+      "label": "日K线（后复权）",
+      "status": "HIT",
+      "elapsed": 1453,
+      "note": "D6 口径：后复权序列；tqFlag=2",
+      "error": null
+    },
+    {
+      "id": "capital-flow",
+      "label": "⑥资金流 + 复权因子",
+      "status": "HIT",
+      "elapsed": 1771,
+      "note": "同时返回 adjustment_factor 表 —— D6 复权因子落库的来源",
+      "error": null
+    },
+    {
+      "id": "holder-count",
+      "label": "⑦股东人数 / 人均流通股",
+      "status": "HIT",
+      "elapsed": 1547,
+      "note": "季度披露，可回溯多期",
+      "error": null
+    },
+    {
+      "id": "top-float",
+      "label": "十大流通股东",
+      "status": "HIT",
+      "elapsed": 2362,
+      "note": "含「实际流通A股」分母，可算十大流通合计占比",
+      "error": null
+    },
+    {
+      "id": "margin",
+      "label": "融资融券余额",
+      "status": "HIT",
+      "elapsed": 4064,
+      "note": "⚠ 月度频率（披露制度决定），非日频",
+      "error": null
+    },
+    {
+      "id": "concept",
+      "label": "所属概念板块",
+      "status": "HIT",
+      "elapsed": 3747,
+      "note": "⚠ deep_info 自然语言入口仅限已验证映射使用",
+      "error": null
+    },
+    {
+      "id": "ifind-valuation",
+      "label": "⑤估值现值 + 近三年分位",
+      "status": "HIT",
+      "elapsed": 6316,
+      "note": "⚠ 单次请求指标数 ≤ 5，超限会静默降级",
+      "error": null
+    },
+    {
+      "id": "ifind-financial",
+      "label": "⑤财务分析指标",
+      "status": "HIT",
+      "elapsed": 3749,
+      "note": "⚠ 同上，≤5 指标/次",
+      "error": null
+    },
+    {
+      "id": "ifind-ddx",
+      "label": "⑥DDX 家族（DDE 大单净量/净额 + 5日/10日）",
+      "status": "HIT",
+      "elapsed": 4000,
+      "note": "⚠ 实返 DDE大单净量/DDE大单净额/5日DDE/10日DDE；3日窗口与DDY需自建",
+      "error": null
+    }
+  ]
+}

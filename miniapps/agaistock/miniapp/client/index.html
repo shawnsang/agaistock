@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>股票复盘教练</title>
+    <style>
+      :root,
+      [data-theme='light'] {
+        --mcode-bg: #ffffff;
+        --mcode-bg-secondary: #f5f5f5;
+        --mcode-surface: #ffffff;
+        --mcode-surface-muted: #fafafa;
+        --mcode-text: #171717;
+        --mcode-text-muted: #666666;
+        --mcode-text-subtle: #adadad;
+        --mcode-border: #0a0a0a14;
+        --mcode-border-strong: #0a0a0af2;
+        --mcode-accent: #0094fc;
+        --mcode-success: #04b54b;
+        --mcode-warning: #f56811;
+        --mcode-danger: #f73646;
+        --mcode-primary-action-bg: #171717;
+        --mcode-primary-action-text: #ffffff;
+      }
+
+      [data-theme='dark'] {
+        --mcode-bg: #171717;
+        --mcode-bg-secondary: #1c1c1c;
+        --mcode-surface: #262626;
+        --mcode-surface-muted: #262626;
+        --mcode-text: #ededed;
+        --mcode-text-muted: #949494;
+        --mcode-text-subtle: #666666;
+        --mcode-border: #ffffff14;
+        --mcode-border-strong: #fffffff2;
+        --mcode-accent: #0077d9;
+        --mcode-success: #009c3d;
+        --mcode-warning: #e25507;
+        --mcode-danger: #e31937;
+        --mcode-primary-action-bg: #ffffff;
+        --mcode-primary-action-text: #171717;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        background: var(--mcode-bg);
+        color: var(--mcode-text);
+        font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+
+      .page { max-width: 1080px; margin: 0 auto; padding: 20px 20px 56px; }
+
+      header.page-head {
+        display: flex; align-items: baseline; justify-content: space-between;
+        gap: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--mcode-border);
+        margin-bottom: 22px;
+      }
+      header.page-head h1 { font-size: 19px; font-weight: 600; margin: 0; letter-spacing: -.01em; }
+      header.page-head .sub { font-size: 12.5px; color: var(--mcode-text-muted); }
+      .runtime-chip { font-size: 11.5px; color: var(--mcode-text-subtle); font-variant-numeric: tabular-nums; }
+
+      section { margin-bottom: 28px; }
+      section > h2 {
+        font-size: 13px; font-weight: 600; color: var(--mcode-text-muted);
+        text-transform: none; letter-spacing: .02em; margin: 0 0 10px;
+        display: flex; align-items: center; gap: 8px;
+      }
+      section > h2 .count {
+        font-size: 11.5px; color: var(--mcode-text-subtle);
+        border: 1px solid var(--mcode-border); border-radius: 999px; padding: 1px 8px;
+      }
+
+      .panel {
+        background: var(--mcode-surface); border: 1px solid var(--mcode-border);
+        border-radius: 12px; padding: 16px;
+      }
+
+      textarea {
+        width: 100%; min-height: 108px; resize: vertical;
+        background: var(--mcode-surface-muted); color: var(--mcode-text);
+        border: 1px solid var(--mcode-border); border-radius: 10px;
+        padding: 10px 12px; font: inherit; line-height: 1.6;
+      }
+      textarea:focus { outline: 2px solid var(--mcode-accent); outline-offset: -1px; }
+
+      .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+
+      button {
+        font: inherit; cursor: pointer; border-radius: 9px;
+        border: 1px solid var(--mcode-border-strong);
+        background: var(--mcode-primary-action-bg); color: var(--mcode-primary-action-text);
+        padding: 8px 16px; font-weight: 500;
+      }
+      button.ghost { background: transparent; color: var(--mcode-text); border-color: var(--mcode-border); }
+      button:disabled { opacity: .45; cursor: not-allowed; }
+      button.recording { background: var(--mcode-danger); color: #fff; border-color: var(--mcode-danger); }
+
+      .rec-indicator {
+        display: none; align-items: center; gap: 8px;
+        font-size: 12.5px; color: var(--mcode-danger); font-variant-numeric: tabular-nums;
+      }
+      .rec-indicator.on { display: inline-flex; }
+      .rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mcode-danger); }
+      .level-track { width: 90px; height: 5px; background: var(--mcode-bg-secondary); border-radius: 3px; overflow: hidden; }
+      .level-fill { height: 100%; width: 0%; background: var(--mcode-danger); transition: width .08s linear; }
+
+      .status { font-size: 12.5px; color: var(--mcode-text-muted); min-height: 20px; margin-top: 10px; }
+      .status[data-tone='error'] { color: var(--mcode-danger); }
+      .status[data-tone='ok'] { color: var(--mcode-success); }
+      .status[data-tone='warn'] { color: var(--mcode-warning); }
+
+      .callout {
+        display: flex; gap: 9px; align-items: flex-start;
+        border: 1px solid var(--mcode-border); border-left: 3px solid var(--mcode-warning);
+        background: var(--mcode-surface-muted); border-radius: 10px;
+        padding: 10px 12px; font-size: 13px; margin-top: 12px;
+      }
+      .callout .ic { flex: none; margin-top: 1px; color: var(--mcode-warning); }
+      .callout strong { font-weight: 600; }
+
+      .card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+      .field { border: 1px solid var(--mcode-border); border-radius: 10px; padding: 11px 13px; background: var(--mcode-surface-muted); }
+      .field dt { font-size: 11.5px; color: var(--mcode-text-muted); margin-bottom: 3px; }
+      .field dd { margin: 0; font-size: 13.5px; color: var(--mcode-text); word-break: break-word; }
+      .field.missing { border-color: var(--mcode-warning); }
+
+      .tag {
+        display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 5px;
+        border: 1px solid var(--mcode-border); color: var(--mcode-text-muted); margin-right: 5px;
+      }
+      .tag.fact { color: var(--mcode-success); border-color: color-mix(in srgb, var(--mcode-success) 35%, transparent); }
+      .tag.assumption { color: var(--mcode-warning); border-color: color-mix(in srgb, var(--mcode-warning) 35%, transparent); }
+      .tag.dir-bullish { color: var(--mcode-danger); border-color: color-mix(in srgb, var(--mcode-danger) 35%, transparent); }
+      .tag.dir-bearish { color: var(--mcode-success); border-color: color-mix(in srgb, var(--mcode-success) 35%, transparent); }
+      .tag.dir-neutral { color: var(--mcode-text-muted); }
+
+      ul.evidence { list-style: none; padding: 0; margin: 4px 0 0; }
+      ul.evidence li { padding: 4px 0; border-bottom: 1px dashed var(--mcode-border); font-size: 13px; }
+      ul.evidence li:last-child { border-bottom: 0; }
+
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { text-align: left; padding: 9px 11px; border-bottom: 1px solid var(--mcode-border); vertical-align: top; }
+      th { font-size: 11.5px; color: var(--mcode-text-muted); font-weight: 600; background: var(--mcode-surface-muted); }
+      tbody tr:last-child td { border-bottom: 0; }
+      td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+      .empty { color: var(--mcode-text-subtle); font-size: 13px; padding: 18px 0; text-align: center; }
+      .hidden { display: none !important; }
+
+      @media (max-width: 720px) {
+        .page { padding: 16px 14px 44px; }
+        .card-grid { grid-template-columns: 1fr; }
+        header.page-head { flex-direction: column; align-items: flex-start; gap: 4px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header class="page-head">
+        <div>
+          <h1>股票复盘教练</h1>
+          <div class="sub">说出来 → 变成观察卡 → 存进观察库</div>
+        </div>
+        <span class="runtime-chip" id="runtime-chip">连接中…</span>
+      </header>
+
+      <section aria-labelledby="h-record">
+        <h2 id="h-record">记录观察</h2>
+        <div class="panel">
+          <label for="raw-text" class="status" style="min-height:0;margin:0 0 6px;color:var(--mcode-text-muted)">
+            口述或直接输入，说清楚：标的、你的主张、依据、以及「什么情况下我错」
+          </label>
+          <textarea id="raw-text" placeholder="例：章源钨业我看了三年了，钨价从去年就开始涨，公司储量排前列，明年上半年产量能翻倍。我觉得还能拿半年。"></textarea>
+
+          <div class="row">
+            <button id="record-btn" class="ghost" type="button">开始录音</button>
+            <span class="rec-indicator" id="rec-indicator" role="status" aria-live="polite">
+              <span class="rec-dot" aria-hidden="true"></span>
+              <span id="rec-time">00:00</span>
+              <span class="level-track" aria-hidden="true"><span class="level-fill" id="level-fill"></span></span>
+            </span>
+            <button id="parse-btn" type="button">解析成观察卡</button>
+          </div>
+
+          <p class="status" id="record-status" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+
+      <section aria-labelledby="h-card" id="card-section" hidden>
+        <h2 id="h-card">观察卡</h2>
+        <div class="panel" id="card-panel"></div>
+      </section>
+
+      <section aria-labelledby="h-log">
+        <h2 id="h-log">观察库 <span class="count" id="obs-count">0</span></h2>
+        <div class="panel">
+          <div id="obs-empty" class="empty">还没有记录。先在上面说一条。</div>
+          <div id="obs-table-wrap" class="hidden">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">时间</th>
+                  <th scope="col">标的</th>
+                  <th scope="col">主张</th>
+                  <th scope="col">方向</th>
+                  <th scope="col">信心</th>
+                  <th scope="col">证伪条件</th>
+                </tr>
+              </thead>
+              <tbody id="obs-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      (function () {
+        'use strict';
+
+        var SPEECH_FORMAT = { sampleRate: 16000, channelCount: 1, sampleFormat: 's16' };
+
+        var rawText = document.getElementById('raw-text');
+        var recordBtn = document.getElementById('record-btn');
+        var parseBtn = document.getElementById('parse-btn');
+        var recIndicator = document.getElementById('rec-indicator');
+        var recTime = document.getElementById('rec-time');
+        var levelFill = document.getElementById('level-fill');
+        var recordStatus = document.getElementById('record-status');
+        var runtimeChip = document.getElementById('runtime-chip');
+        var cardSection = document.getElementById('card-section');
+        var cardPanel = document.getElementById('card-panel');
+        var obsRows = document.getElementById('obs-rows');
+        var obsEmpty = document.getElementById('obs-empty');
+        var obsTableWrap = document.getElementById('obs-table-wrap');
+        var obsCount = document.getElementById('obs-count');
+
+        var currentDraft = null;
+        var capture = null;
+        var recTimer = null;
+        var recSeconds = 0;
+        var transcribing = false;
+
+        /* ---------- theme ---------- */
+        function applyTheme(theme) {
+          document.documentElement.dataset.theme = theme === 'dark' ? 'dark' : 'light';
+        }
+        applyTheme(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        var hostUi = window.mcode && window.mcode.miniapp && window.mcode.miniapp.host && window.mcode.miniapp.host.ui;
+        if (hostUi && hostUi.subscribe) {
+          hostUi.subscribe(
+            function (state) { if (state && state.theme) applyTheme(state.theme); },
+            { onError: function () {} }
+          );
+        }
+
+        /* ---------- helpers ---------- */
+        function setStatus(node, text, tone) {
+          node.textContent = text || '';
+          if (tone) node.dataset.tone = tone;
+          else delete node.dataset.tone;
+        }
+        function escapeHtml(value) {
+          return String(value === undefined || value === null ? '' : value)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        var DIRECTION_LABEL = { bullish: '看多', bearish: '看空', neutral: '中性' };
+
+        /* ---------- runtime status ---------- */
+        var runtimeState = { speech: null, agent: null, count: 0 };
+
+        function renderChip() {
+          var speech = runtimeState.speech;
+          var agent = runtimeState.agent;
+          runtimeChip.textContent =
+            (speech === true ? '语音可用' : speech === false ? '语音不可用' : '语音状态未知') + ' · ' +
+            (agent === true ? 'Agent 可用' : agent === false ? 'Agent 不可用' : 'Agent 状态未知') +
+            ' · 已存 ' + (runtimeState.count || 0) + ' 条';
+        }
+
+        function refreshStatus() {
+          fetch('/api/status', { headers: { accept: 'application/json' } })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+              var caps = data.capabilities || {};
+              runtimeState.speech = caps.speechTranscribe === true;
+              runtimeState.agent = data.agent === true;
+              runtimeState.count = data.observationCount || 0;
+              renderChip();
+              if (!runtimeState.speech) {
+                recordBtn.disabled = true;
+                recordBtn.title = '当前宿主未提供语音识别，或插件详情里的「使用麦克风」开关是关闭的。';
+              }
+              if (!runtimeState.agent) {
+                parseBtn.disabled = true;
+                parseBtn.title = '当前宿主未授权 Agent 能力。';
+              }
+            })
+            .catch(function () { runtimeChip.textContent = '运行时状态未知'; });
+        }
+
+        /* ---------- microphone capture ---------- */
+        function startCapture() {
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            setStatus(recordStatus, '这个环境不支持录音，请直接输入文字。', 'error');
+            return;
+          }
+          navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, echoCancellation: true, autoGainControl: true, noiseSuppression: true },
+          }).then(function (stream) {
+            var audioContext = new AudioContext({ sampleRate: SPEECH_FORMAT.sampleRate });
+            var source = audioContext.createMediaStreamSource(stream);
+            var processor = audioContext.createScriptProcessor(4096, 1, 1);
+            var chunks = [];
+            var level = 0;
+
+            processor.onaudioprocess = function (event) {
+              var input = event.inputBuffer.getChannelData(0);
+              var pcm = new Int16Array(input.length);
+              var sum = 0;
+              for (var i = 0; i < input.length; i += 1) {
+                var s = Math.max(-1, Math.min(1, input[i] || 0));
+                pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+                sum += s * s;
+              }
+              chunks.push(pcm);
+              level = Math.min(1, Math.sqrt(sum / input.length) / 0.15);
+              levelFill.style.width = Math.round(level * 100) + '%';
+            };
+
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+
+            capture = {
+              stop: function () {
+                processor.disconnect();
+                source.disconnect();
+                stream.getTracks().forEach(function (t) { t.stop(); });
+                audioContext.close().catch(function () {});
+                var total = chunks.reduce(function (sum, c) { return sum + c.length; }, 0);
+                var pcm = new Int16Array(total);
+                var offset = 0;
+                chunks.forEach(function (c) { pcm.set(c, offset); offset += c.length; });
+                return pcm;
+              },
+              cancel: function () {
+                processor.disconnect();
+                source.disconnect();
+                stream.getTracks().forEach(function (t) { t.stop(); });
+                audioContext.close().catch(function () {});
+              },
+            };
+
+            recSeconds = 0;
+            recTime.textContent = '00:00';
+            recTimer = setInterval(function () {
+              recSeconds += 1;
+              recTime.textContent =
+                String(Math.floor(recSeconds / 60)).padStart(2, '0') + ':' + String(recSeconds % 60).padStart(2, '0');
+            }, 1000);
+
+            recordBtn.textContent = '停止并转写';
+            recordBtn.classList.add('recording');
+            recIndicator.classList.add('on');
+            setStatus(recordStatus, '正在录音…说完点「停止并转写」。', 'warn');
+          }).catch(function (error) {
+            var name = error && error.name ? error.name : 'Error';
+            if (name === 'NotAllowedError') {
+              setStatus(recordStatus, '麦克风被拒绝。请在插件详情里打开「使用麦克风」，或直接输入文字。', 'error');
+            } else {
+              setStatus(recordStatus, '无法打开麦克风：' + name, 'error');
+            }
+          });
+        }
+
+        function endCapture() {
+          if (!capture) return;
+          var pcm = capture.stop();
+          capture = null;
+          clearInterval(recTimer);
+          recTimer = null;
+          recordBtn.textContent = '开始录音';
+          recordBtn.classList.remove('recording');
+          recIndicator.classList.remove('on');
+          levelFill.style.width = '0%';
+
+          if (!pcm || pcm.length === 0) {
+            setStatus(recordStatus, '没有录到声音，请重试或直接输入文字。', 'warn');
+            return;
+          }
+          transcribe(pcm);
+        }
+
+        function transcribe(pcm) {
+          var speech = window.mcode && window.mcode.miniapp && window.mcode.miniapp.speech;
+          if (!speech || !speech.transcribe) {
+            setStatus(recordStatus, '当前宿主不支持语音识别，请直接输入文字。', 'error');
+            return;
+          }
+          transcribing = true;
+          recordBtn.disabled = true;
+          setStatus(recordStatus, '转写中…', 'warn');
+          speech
+            .transcribe({ audio: pcm, format: SPEECH_FORMAT }, {
+              onPartial: function (partial) { rawText.value = partial; },
+            })
+            .then(function (result) {
+              rawText.value = result.text || '';
+              setStatus(recordStatus, '转写完成，确认文字后点「解析成观察卡」。', 'ok');
+            })
+            .catch(function (error) {
+              var code = error && error.message ? error.message : 'unknown';
+              var messages = {
+                not_permitted: '语音权限未开启。请在插件详情里打开「使用麦克风」。',
+                runtime_unavailable: '宿主的语音识别当前不可用，请直接输入文字。',
+                transcription_failed: '转写失败，请重试或直接输入文字。',
+                result_unknown: '转写结果未知，请检查文字框内容。',
+                audio_too_large: '录音太长，请分段录制。',
+              };
+              setStatus(recordStatus, messages[code] || ('转写失败：' + code), 'error');
+            })
+            .finally(function () {
+              transcribing = false;
+              recordBtn.disabled = false;
+            });
+        }
+
+        recordBtn.addEventListener('click', function () {
+          if (capture) endCapture();
+          else startCapture();
+        });
+
+        /* ---------- parse ---------- */
+        function renderCard(draft) {
+          var directionClass = 'dir-' + (draft.direction || 'neutral');
+          var html = '';
+
+          html += '<dl class="card-grid">';
+          html += '<div class="field"><dt>标的</dt><dd>' +
+            escapeHtml((draft.symbol || '') + (draft.name ? ' ' + draft.name : '') || '未识别') + '</dd></div>';
+          html += '<div class="field"><dt>一句话主张</dt><dd>' + escapeHtml(draft.thesis || '（未提取）') + '</dd></div>';
+          html += '<div class="field"><dt>方向 / 信心</dt><dd><span class="tag ' + directionClass + '">' +
+            escapeHtml(DIRECTION_LABEL[draft.direction] || draft.direction) + '</span>' +
+            '<span class="mono" style="font-variant-numeric:tabular-nums">' +
+            (Math.round((draft.confidence || 0) * 100)) + '%</span></dd></div>';
+          html += '<div class="field"><dt>时限 / 催化剂</dt><dd>' +
+            escapeHtml(draft.timeframe || '（未说明）') + (draft.trigger ? ' · ' + escapeHtml(draft.trigger) : '') + '</dd></div>';
+          html += '</dl>';
+
+          if (draft.evidence && draft.evidence.length) {
+            html += '<h3 style="font-size:12px;color:var(--mcode-text-muted);margin:14px 0 4px">依据</h3><ul class="evidence">';
+            draft.evidence.forEach(function (item) {
+              html += '<li><span class="tag ' + (item.type === 'fact' ? 'fact' : 'assumption') + '">' +
+                (item.type === 'fact' ? '事实' : '假设') + '</span>' + escapeHtml(item.text) + '</li>';
+            });
+            html += '</ul>';
+          }
+
+          var invalidation = draft.invalidation || [];
+          if (!invalidation.length) {
+            html += '<div class="callout"><span class="ic">'
+              + '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>'
+              + '</span><div><strong>这条观察缺少证伪条件。</strong><br>'
+              + '没有「什么情况下我错」，到期就无法判定对错，也就无法进入校准统计。建议补一句：'
+              + '跌破 MA20 或主力连续 3 日净流出，即视为判断错误。</div></div>';
+          } else {
+            html += '<h3 style="font-size:12px;color:var(--mcode-text-muted);margin:14px 0 4px">证伪条件</h3><ul class="evidence">';
+            invalidation.forEach(function (item) {
+              html += '<li>' + escapeHtml(item) + '</li>';
+            });
+            html += '</ul>';
+          }
+
+          if (draft.position && (draft.position.entry || draft.position.size)) {
+            html += '<h3 style="font-size:12px;color:var(--mcode-text-muted);margin:14px 0 4px">仓位</h3>';
+            html += '<div class="field" style="margin-top:0"><dd>' +
+              escapeHtml([draft.position.entry, draft.position.size].filter(Boolean).join(' · ') || '（未说明）') +
+              '</dd></div>';
+          }
+
+          html += '<div class="row"><button id="save-btn" type="button">存进观察库</button></div>';
+
+          cardPanel.innerHTML = html;
+          cardSection.hidden = false;
+
+          var saveBtn = document.getElementById('save-btn');
+          if (saveBtn) {
+            saveBtn.addEventListener('click', function () {
+              saveBtn.disabled = true;
+              fetch('/api/save', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ draft: currentDraft, rawText: rawText.value }),
+              })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                  if (data.ok) {
+                    setStatus(recordStatus, '已保存，共 ' + data.total + ' 条。', 'ok');
+                    runtimeState.count = data.total;
+                    renderChip();
+                    loadObservations();
+                  } else {
+                    setStatus(recordStatus, data.message || '保存失败。', 'error');
+                    saveBtn.disabled = false;
+                  }
+                })
+                .catch(function () {
+                  setStatus(recordStatus, '保存失败。', 'error');
+                  saveBtn.disabled = false;
+                });
+            });
+          }
+        }
+
+        parseBtn.addEventListener('click', function () {
+          var text = rawText.value.trim();
+          if (!text) {
+            setStatus(recordStatus, '先说点什么，或直接输入文字。', 'warn');
+            return;
+          }
+          parseBtn.disabled = true;
+          setStatus(recordStatus, '正在解析成观察卡…', 'warn');
+          fetch('/api/parse', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: text }),
+          })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+              if (data.ok) {
+                currentDraft = data.draft;
+                renderCard(data.draft);
+                setStatus(recordStatus, '解析完成。', 'ok');
+              } else {
+                setStatus(recordStatus, data.message || '解析失败。', 'error');
+              }
+            })
+            .catch(function () {
+              setStatus(recordStatus, '解析请求失败。', 'error');
+            })
+            .finally(function () { parseBtn.disabled = false; });
+        });
+
+        /* ---------- observation log ---------- */
+        function loadObservations() {
+          fetch('/api/observations', { headers: { accept: 'application/json' } })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+              var items = (data && data.items) || [];
+              obsCount.textContent = items.length;
+              runtimeState.count = items.length;
+              renderChip();
+              if (!items.length) {
+                obsEmpty.classList.remove('hidden');
+                obsTableWrap.classList.add('hidden');
+                return;
+              }
+              obsEmpty.classList.add('hidden');
+              obsTableWrap.classList.remove('hidden');
+              obsRows.innerHTML = items.map(function (item) {
+                var d = item.draft || {};
+                var dir = 'dir-' + (d.direction || 'neutral');
+                var hasInvalidation = (d.invalidation || []).length > 0;
+                var when = new Date(item.createdAt);
+                return '<tr>'
+                  + '<td class="num">' + escapeHtml(when.toLocaleString('zh-CN', { hour12: false })) + '</td>'
+                  + '<td class="num">' + escapeHtml((d.symbol || '—') + (d.name ? ' ' + d.name : '')) + '</td>'
+                  + '<td>' + escapeHtml(d.thesis || '（未提取）') + '</td>'
+                  + '<td><span class="tag ' + dir + '">' + escapeHtml(DIRECTION_LABEL[d.direction] || d.direction) + '</span></td>'
+                  + '<td class="num">' + Math.round((d.confidence || 0) * 100) + '%</td>'
+                  + '<td>' + (hasInvalidation
+                      ? escapeHtml((d.invalidation || []).join('；'))
+                      : '<span style="color:var(--mcode-warning)">缺失</span>') + '</td>'
+                  + '</tr>';
+              }).join('');
+            })
+            .catch(function () { /* leave the empty state as is */ });
+        }
+
+        refreshStatus();
+        loadObservations();
+        document.addEventListener('visibilitychange', function () {
+          if (document.visibilityState === 'hidden') {
+            try { window.localStorage.setItem('agaistock.draft', rawText.value); } catch (e) {}
+          }
+        });
+        try {
+          var saved = window.localStorage.getItem('agaistock.draft');
+          if (saved && !rawText.value) rawText.value = saved;
+        } catch (e) {}
+      })();
+    </script>
+  </body>
+</html>
