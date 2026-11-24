@@ -34,6 +34,12 @@
 13. **软删除**：置 `observations.deleted_at`，**不物理删除**；软删观察不参与评分 / 观察期 / 校准统计，其 `reviews` 保留。
 14. **每个 Task 结束必须 commit**。仓库尚未初始化，Task 1 负责 `git init`。
 15. 内核包路径统一为 `src/agaistock/`，通过 `pyproject.toml` 的 `src` 布局安装；测试放 `tests/`。
+16. **复权口径（D6；2026-11-24 用户裁决）**：K 线一律取 **后复权**，即 `tdx_kline` **必须**带 `tqFlag:"2"`（不传会拿到连接器默认的**前复权**，同一批 K 线价位可差数倍）。复权因子经 `tdx_api_data` 的 `capital_flow` preset 取 `adjustment_factor` 表并**落库**（主规格 §6.7.4）。**所有中枢 / 枢轴 / 支撑压力 / 证伪位都是后复权空间的价位**；若要向用户展示现价口径，用 `adjustment_factors` 表换算，不得把后复权价位直接说成现价。
+17. **复权口径在适配层收口**（主规格 §6.7）：provider 返回统一 schema，`tqFlag` 由 `providers/tdx.py` 固定为 `"2"`，不向调用方暴露成可切换参数——避免下游任务各自选口径。
+18. **后复权 ↔ 现价 的换算公式（已实测）**：`后复权价 = 现价 × 精确复权因子 + 精确复权常数`，反解 `现价 = (后复权价 − 精确复权常数) / 精确复权因子`。
+    因子与常数取 `adjustment_factor` 表中**该价格所属日期**的那一行（对「当前价位」用最新一行）。
+    实测：600519 `1460.00 × 5.627766 + 1798.159313 = 10014.70`（= `tdx_kline` 的 `tqFlag:"2"` 实测值）；002378 `15.54 × 2.6 + 2.2552 = 42.66` ✓。
+    **推论**：后复权序列的价位与实时行情（现价）**不在同一空间**，凡是拿后复权位与现价比对的地方（如 Task 10 的 `fetch_last_close` 回退路径、Task 15 的展示）**必须**先换算，否则会把 10014 当成 1460 比。
 
 ---
 
@@ -46,7 +52,7 @@
 | `config/scoring.json` | 五维定义与权重（**固定集合**） |
 | `config/reviewers.json` | 点评师注册表（id / enabled / module / weight） |
 | `src/agaistock/config.py` | 读取上述两个 JSON，提供 `load_scoring()` / `load_reviewers()` |
-| `src/agaistock/storage/db.py` | SQLite 连接、建表、迁移；observations / reviews 读写 |
+| `src/agaistock/storage/db.py` | SQLite 连接、建表、迁移；observations / reviews / adjustment_factors 读写 |
 | `src/agaistock/reviewers/contract.py` | `Finding` / `ProposedInvalidation` / `HorizonHint` / `ReviewVerdict` / `ReviewContext` + 校验 |
 | `src/agaistock/reviewers/registry.py` | 按 `config/reviewers.json` 发现并实例化点评师 |
 | `src/agaistock/reviewers/engine.py` | 调度点评师、失败隔离、落库 |
@@ -278,6 +284,8 @@ git commit -m "chore: init python package skeleton and config loaders"
   - `agaistock.storage.db.soft_delete_observation(conn, observation_id: str) -> bool`，置 `deleted_at`；找不到返回 False。
   - `agaistock.storage.db.insert_review(conn, observation_id: str, verdict: dict) -> str`，返回 id。
   - `agaistock.storage.db.latest_reviews(conn, observation_id: str) -> list[dict]`，每位 reviewer 只返回 `ran_at` 最新的一条，按 `ran_at` 升序。
+  - `agaistock.storage.db.insert_adjustment_factors(conn, symbol: str, factors: list[dict]) -> int`，写入复权因子，返回写入条数；同一 `(symbol, ex_date)` 重复写入**覆盖**（upsert），不报错。`factors` 每项形如 `{"ex_date": "2026-06-26", "factor": 2.6, "constant": 2.2552}`。
+  - `agaistock.storage.db.list_adjustment_factors(conn, symbol: str) -> list[dict]`，按 `ex_date` **降序**返回该标的的复权因子，字段为 `symbol` / `ex_date` / `factor` / `constant` / `fetched_at`。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -334,6 +342,7 @@ class StorageTests(unittest.TestCase):
         }
         self.assertIn("observations", tables)
         self.assertIn("reviews", tables)
+        self.assertIn("adjustment_factors", tables)
 
     def test_insert_and_list_observation(self):
         conn = make_conn()
@@ -372,6 +381,47 @@ class StorageTests(unittest.TestCase):
         self.assertEqual([r["reviewer_id"] for r in latest], ["b", "a"])
         a_rows = [r for r in latest if r["reviewer_id"] == "a"]
         self.assertEqual(a_rows[0]["ran_at"], "2026-11-24T09:00:00Z")
+
+    def test_insert_and_list_adjustment_factors(self):
+        conn = make_conn()
+        written = db.insert_adjustment_factors(
+            conn,
+            "002378",
+            [
+                {"ex_date": "2025-06-06", "factor": 2.6, "constant": 1.9432},
+                {"ex_date": "2026-06-26", "factor": 2.6, "constant": 2.2552},
+            ],
+        )
+        self.assertEqual(written, 2)
+        rows = db.list_adjustment_factors(conn, "002378")
+        # 按 ex_date 降序：最近的除权事件排在最前
+        self.assertEqual([r["ex_date"] for r in rows], ["2026-06-26", "2025-06-06"])
+        self.assertEqual(rows[0]["factor"], 2.6)
+        self.assertEqual(rows[0]["constant"], 2.2552)
+
+    def test_insert_adjustment_factors_upserts_same_ex_date(self):
+        conn = make_conn()
+        db.insert_adjustment_factors(
+            conn, "002378", [{"ex_date": "2026-06-26", "factor": 2.6, "constant": 2.2552}]
+        )
+        db.insert_adjustment_factors(
+            conn, "002378", [{"ex_date": "2026-06-26", "factor": 2.6, "constant": 9.9999}]
+        )
+        rows = db.list_adjustment_factors(conn, "002378")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["constant"], 9.9999)
+
+    def test_list_adjustment_factors_is_symbol_scoped(self):
+        conn = make_conn()
+        db.insert_adjustment_factors(
+            conn, "002378", [{"ex_date": "2026-06-26", "factor": 2.6, "constant": 2.2552}]
+        )
+        db.insert_adjustment_factors(
+            conn, "600519", [{"ex_date": "2026-06-26", "factor": 1.0, "constant": 1.0}]
+        )
+        rows = db.list_adjustment_factors(conn, "600519")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["symbol"], "600519")
 
 
 if __name__ == "__main__":
@@ -437,6 +487,15 @@ CREATE TABLE IF NOT EXISTS reviews (
 
 CREATE INDEX IF NOT EXISTS idx_reviews_obs
     ON reviews(observation_id, reviewer_id, ran_at);
+
+CREATE TABLE IF NOT EXISTS adjustment_factors (
+    symbol     TEXT NOT NULL,
+    ex_date    TEXT NOT NULL,
+    factor     REAL NOT NULL,
+    constant   REAL NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, ex_date)
+);
 """
 
 
@@ -565,6 +624,43 @@ def latest_reviews(conn: sqlite3.Connection, observation_id: str) -> list[dict]:
         item["verdict"] = json.loads(item.pop("verdict_json"))
         result.append(item)
     return result
+
+
+def insert_adjustment_factors(
+    conn: sqlite3.Connection, symbol: str, factors: list[dict[str, Any]]
+) -> int:
+    """写入复权因子；同一 (symbol, ex_date) 重复写入覆盖。"""
+    fetched_at = _now()
+    for item in factors:
+        conn.execute(
+            """INSERT INTO adjustment_factors
+               (symbol, ex_date, factor, constant, fetched_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(symbol, ex_date) DO UPDATE SET
+                   factor = excluded.factor,
+                   constant = excluded.constant,
+                   fetched_at = excluded.fetched_at""",
+            (
+                str(symbol),
+                str(item["ex_date"]),
+                float(item["factor"]),
+                float(item["constant"]),
+                fetched_at,
+            ),
+        )
+    conn.commit()
+    return len(factors)
+
+
+def list_adjustment_factors(conn: sqlite3.Connection, symbol: str) -> list[dict[str, Any]]:
+    """按 ex_date 降序返回该标的的复权因子。"""
+    rows = conn.execute(
+        """SELECT symbol, ex_date, factor, constant, fetched_at
+           FROM adjustment_factors WHERE symbol = ?
+           ORDER BY ex_date DESC""",
+        (str(symbol),),
+    )
+    return [dict(row) for row in rows]
 ```
 
 同时创建空文件 `src/agaistock/storage/__init__.py`。
@@ -575,7 +671,7 @@ def latest_reviews(conn: sqlite3.Connection, observation_id: str) -> list[dict]:
 python -m unittest tests.test_storage -v
 ```
 
-Expected: 6 tests PASS
+Expected: 9 tests PASS
 
 - [ ] **Step 5: Commit**
 
@@ -1317,9 +1413,22 @@ git commit -m "feat: reviewer registry and execution engine with failure isolati
     返回连接器返回的 **text 字段**（已剥掉外层 `[{type:"text",text:...}]` 包装）。
   - `agaistock.providers.mcode_cli.MCodedToolsMissing(RuntimeError)` —— CLI 不在 PATH 时抛出。
   - `agaistock.providers.tdx.fetch_kline(symbol: str, setcode: str, period: str, want_num: int = 500) -> dict`
-    返回**原始 payload**（含 `Rows` / `ListHead` / `AttachInfo`）。
-  - `agaistock.providers.tdx.setcode_for(symbol: str) -> str`，按代码前缀推断市场：`6`→`"1"`，`0`/`3`→`"0"`，`4`/`8`→`"2"`。
+    返回**原始 payload**（含 `Rows` / `ListHead` / `AttachInfo`）。**固定请求后复权**（内部带 `tqFlag:"2"`），
+    调用方无需也不能切换复权口径（Global Constraint 16/17）。
+  - `agaistock.providers.tdx.fetch_adjustment_factors(symbol: str) -> list[dict]`
+    拉取该标的的**复权因子**（经 `tdx_api_data` 的 `capital_flow` preset），归一化为
+    `[{"ex_date": "2026-06-26", "factor": 2.6, "constant": 2.2552}, ...]`，按 `ex_date` 降序；
+    该标的没有除权记录时返回 `[]`。
+  - `agaistock.providers.tdx.setcode_for(symbol: str) -> str`，按代码前缀推断市场：`6`→`"1"`，`0`/`3`→`"0"`，`4`/`8`/`9`→`"2"`（北交所含 `920xxx`）。
   - `agaistock.providers.tdx.TDX_KLINE = "connector__tdx-finance__tdx_kline"`
+  - `agaistock.providers.tdx.TDX_API_DATA = "connector__tdx-finance__tdx_api_data"`
+  - `agaistock.providers.tdx.to_houfuquan(price: float, factor_row: dict) -> float`
+    现价（不复权/前复权）→ 后复权：`price × factor + constant`。`factor_row` 是
+    `fetch_adjustment_factors` 返回的一行（`{"ex_date", "factor", "constant"}`）。
+  - `agaistock.providers.tdx.to_current_price(price: float, factor_row: dict) -> float`
+    后复权 → 现价：`(price − constant) / factor`。
+  - `agaistock.storage.db.insert_adjustment_factors(conn, symbol, factors) -> int` / `list_adjustment_factors(conn, symbol) -> list[dict]`
+    —— 复权因子落库（Task 2 存储层的扩展，见 Task 2 的 SCHEMA 与 Interfaces）。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1399,7 +1508,9 @@ if __name__ == "__main__":
 `tests/test_tdx.py`：
 
 ```python
+import json
 import unittest
+from unittest import mock
 
 from agaistock.providers import tdx
 
@@ -1417,9 +1528,79 @@ class TdxTests(unittest.TestCase):
     def test_setcode_for_bse(self):
         self.assertEqual(tdx.setcode_for("430047"), "2")
 
+    def test_setcode_for_bse_new_code_space(self):
+        # 北交所 920xxx 是当前代码空间，连接器按 setcode=2 提供
+        self.assertEqual(tdx.setcode_for("920001"), "2")
+
     def test_setcode_rejects_unknown_prefix(self):
         with self.assertRaises(ValueError):
             tdx.setcode_for("12345")
+
+    @mock.patch("agaistock.providers.tdx.call_connector")
+    def test_fetch_kline_requests_houfuquan(self, fake_call):
+        fake_call.return_value = json.dumps({"Rows": []})
+        tdx.fetch_kline("600519", "1", "4", want_num=3)
+        tool, args = fake_call.call_args[0]
+        self.assertEqual(tool, tdx.TDX_KLINE)
+        # D6 口径：必须显式带 tqFlag=2，否则连接器默认返回前复权
+        self.assertEqual(args["tqFlag"], "2")
+        self.assertEqual(args["wantNum"], 3)
+
+    @mock.patch("agaistock.providers.tdx.call_connector")
+    def test_fetch_adjustment_factors_normalizes_rows(self, fake_call):
+        fake_call.return_value = (
+            "tdx_api_data 请求成功\n\n"
+            + json.dumps(
+                {
+                    "response": {
+                        "transformed": {
+                            "tables": [
+                                {
+                                    "name": "capital_flow",
+                                    "rows": [{"日期": "2026-11-24", "主力净额金额(元)": -1}],
+                                },
+                                {
+                                    "name": "adjustment_factor",
+                                    "rows": [
+                                        {"日期": "2026-06-26", "精确复权因子": 2.6, "精确复权常数": 2.2552},
+                                        {"日期": "2025-06-06", "精确复权因子": 2.6, "精确复权常数": 1.9432},
+                                    ],
+                                },
+                            ]
+                        }
+                    }
+                },
+                ensure_ascii=False,
+            )
+        )
+        factors = tdx.fetch_adjustment_factors("002378")
+        self.assertEqual(
+            factors,
+            [
+                {"ex_date": "2026-06-26", "factor": 2.6, "constant": 2.2552},
+                {"ex_date": "2025-06-06", "factor": 2.6, "constant": 1.9432},
+            ],
+        )
+
+    @mock.patch("agaistock.providers.tdx.call_connector")
+    def test_fetch_adjustment_factors_empty_when_table_absent(self, fake_call):
+        fake_call.return_value = (
+            "tdx_api_data 请求成功\n\n"
+            + json.dumps({"response": {"transformed": {"tables": []}}}, ensure_ascii=False)
+        )
+        self.assertEqual(tdx.fetch_adjustment_factors("002378"), [])
+
+    def test_to_houfuquan_matches_measured_formula(self):
+        # 600519 2026-06-26 的因子行：现价 1460.00 → 后复权 10014.70
+        row = {"ex_date": "2026-06-26", "factor": 5.627766, "constant": 1798.159313}
+        self.assertAlmostEqual(tdx.to_houfuquan(1460.0, row), 10014.70, places=2)
+
+    def test_to_current_price_is_inverse_of_to_houfuquan(self):
+        row = {"ex_date": "2026-06-26", "factor": 5.627766, "constant": 1798.159313}
+        self.assertAlmostEqual(tdx.to_current_price(10014.70, row), 1460.0, places=2)
+        self.assertAlmostEqual(
+            tdx.to_current_price(tdx.to_houfuquan(15.54, row), row), 15.54, places=6
+        )
 
 
 if __name__ == "__main__":
@@ -1524,7 +1705,11 @@ def call_connector(tool: str, args: dict, timeout: int = 180) -> str:
 - [ ] **Step 4: 实现 tdx.py**
 
 ```python
-"""通达信取数（经由 mcode-tools 连接器）。"""
+"""通达信取数（经由 mcode-tools 连接器）。
+
+复权口径（D6 / Global Constraint 16）：K 线固定取**后复权**（tqFlag="2"）。
+口径在适配层收口，调用方不传、不切换。
+"""
 from __future__ import annotations
 
 import json
@@ -1533,6 +1718,15 @@ from .mcode_cli import call_connector
 
 TDX_KLINE = "connector__tdx-finance__tdx_kline"
 TDX_QUOTES = "connector__tdx-finance__tdx_quotes"
+TDX_API_DATA = "connector__tdx-finance__tdx_api_data"
+
+# D6 口径：后复权序列。不传这个参数，连接器默认给的是前复权。
+TQ_FLAG_HOUFUQUAN = "2"
+
+# 复权因子所在的后端接口与子视图（主规格 §6.7.4）。
+# 同一个 preset 还顺带返回 capital_flow 表；本任务只取复权因子。
+_ADJ_ENTRY = "TdxSharePCCW.tdxf10_gg_jyds"
+_ADJ_FIXED_TAG = "zjlx"
 
 
 def setcode_for(symbol: str) -> str:
@@ -1544,7 +1738,8 @@ def setcode_for(symbol: str) -> str:
         return "1"
     if code.startswith(("0", "3")):
         return "0"
-    if code.startswith(("4", "8")):
+    # 北交所：43xxxx / 83xxxx / 87xxxx 旧代码段 + 920xxx 当前代码段
+    if code.startswith(("4", "8", "9")):
         return "2"
     raise ValueError(f"无法识别的证券代码前缀: {symbol!r}")
 
@@ -1553,15 +1748,20 @@ def _payload_from_text(text: str) -> dict:
     """从连接器返回文本中抽出 JSON 负载。
 
     返回文本形如：`<摘要>\n详细K线数据:\n{...}` —— 取第一个 `{` 起的内容。
+    用 raw_decode 只解析第一个 JSON 值，容忍 JSON 之后还有尾随说明文字。
     """
     start = text.find("{")
     if start < 0:
         raise RuntimeError(f"连接器返回中找不到 JSON: {text[:200]}")
-    return json.loads(text[start:])
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"连接器返回的 JSON 解析失败: {text[start:][:200]}") from exc
+    return payload
 
 
 def fetch_kline(symbol: str, setcode: str, period: str, want_num: int = 500) -> dict:
-    """拉取 K 线，返回原始 payload（含升序的 Rows）。"""
+    """拉取 K 线（后复权），返回原始 payload（含升序的 Rows）。"""
     text = call_connector(
         TDX_KLINE,
         {
@@ -1569,6 +1769,7 @@ def fetch_kline(symbol: str, setcode: str, period: str, want_num: int = 500) -> 
             "setcode": str(setcode),
             "period": str(period),
             "wantNum": int(want_num),
+            "tqFlag": TQ_FLAG_HOUFUQUAN,
         },
     )
     return _payload_from_text(text)
@@ -1578,6 +1779,50 @@ def fetch_quotes(symbol: str, setcode: str) -> dict:
     """拉取实时行情快照。"""
     text = call_connector(TDX_QUOTES, {"code": str(symbol), "setcode": str(setcode)})
     return _payload_from_text(text)
+
+
+def fetch_adjustment_factors(symbol: str) -> list[dict]:
+    """拉取复权因子，归一化成 [{ex_date, factor, constant}]，按 ex_date 降序。
+
+    数据来自 tdx_api_data 的 capital_flow preset —— 同一个 preset 返回两张表，
+    复权因子那张叫 adjustment_factor，列名是中文：
+    日期 / 精确复权因子 / 精确复权常数。
+    """
+    text = call_connector(
+        TDX_API_DATA,
+        {"entry": _ADJ_ENTRY, "fixedTag": _ADJ_FIXED_TAG, "code": str(symbol)},
+    )
+    payload = _payload_from_text(text)
+    tables = (payload.get("response") or {}).get("transformed", {}).get("tables") or []
+    for table in tables:
+        if table.get("name") != "adjustment_factor":
+            continue
+        factors = []
+        for row in table.get("rows") or []:
+            factors.append(
+                {
+                    "ex_date": str(row.get("日期", "")),
+                    "factor": float(row.get("精确复权因子", 0) or 0),
+                    "constant": float(row.get("精确复权常数", 0) or 0),
+                }
+            )
+        factors.sort(key=lambda item: item["ex_date"], reverse=True)
+        return factors
+    return []
+
+
+def to_houfuquan(price: float, factor_row: dict) -> float:
+    """现价 → 后复权。
+
+    公式（已实测）：后复权价 = 现价 × 精确复权因子 + 精确复权常数。
+    `factor_row` 必须是该价格所属日期对应的那一行（当前价位用最新一行）。
+    """
+    return float(price) * float(factor_row["factor"]) + float(factor_row["constant"])
+
+
+def to_current_price(price: float, factor_row: dict) -> float:
+    """后复权 → 现价（`to_houfuquan` 的逆变换）。"""
+    return (float(price) - float(factor_row["constant"])) / float(factor_row["factor"])
 ```
 
 同时创建空文件 `src/agaistock/providers/__init__.py`。
@@ -1588,9 +1833,19 @@ def fetch_quotes(symbol: str, setcode: str) -> dict:
 python -m unittest tests.test_mcode_cli tests.test_tdx -v
 ```
 
-Expected: 10 tests PASS（`test_mcode_cli` 5 条 + `test_tdx` 5 条）
+Expected: 16 tests PASS（`test_mcode_cli` 5 条 + `test_tdx` 11 条）+ `test_storage` 9 条
 
-- [ ] **Step 6: 冒烟验证真实调用（可选但强烈建议）**
+- [ ] **Step 6: 实现复权因子落库（存储层扩展）**
+
+Task 2 的 `src/agaistock/storage/db.py` 按 Task 2 段的 SCHEMA 与 Interfaces 增补：
+
+- `SCHEMA` 里加 `adjustment_factors` 表（`symbol` / `ex_date` / `factor` / `constant` / `fetched_at`，主键 `(symbol, ex_date)`）。
+- `insert_adjustment_factors(conn, symbol, factors) -> int`：同一 `(symbol, ex_date)` 重复写入**覆盖**（upsert），返回写入条数。
+- `list_adjustment_factors(conn, symbol) -> list[dict]`：按 `ex_date` **降序**返回。
+
+`tests/test_storage.py` 同步增补 3 条测试（见 Task 2 段）。
+
+- [ ] **Step 7: 冒烟验证真实调用（可选但强烈建议）**
 
 ```bash
 python -c "from agaistock.providers import tdx; p=tdx.fetch_kline('002378','0','4',5); print(len(p['Rows'])); print(p['Rows'][0]['Data']); print(p['Rows'][-1]['Data'])"
@@ -1598,11 +1853,17 @@ python -c "from agaistock.providers import tdx; p=tdx.fetch_kline('002378','0','
 
 Expected: `5` / `20261118` / `20261124`（**首早末晚 = 升序**）
 
-- [ ] **Step 7: Commit**
+```bash
+python -c "from agaistock.providers import tdx; f=tdx.fetch_adjustment_factors('002378'); print(len(f)); print(f[0])"
+```
+
+Expected: `14` / `{'ex_date': '2026-06-26', 'factor': 2.6, 'constant': 2.2552}`
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/agaistock/providers tests/test_mcode_cli.py tests/test_tdx.py
-git commit -m "feat: mcode-tools connector bridge and tdx kline provider"
+git add src/agaistock/providers src/agaistock/storage/db.py tests/test_mcode_cli.py tests/test_tdx.py tests/test_storage.py
+git commit -m "feat: mcode-tools connector bridge, tdx kline provider and adjustment factors"
 ```
 
 ---
@@ -1614,7 +1875,7 @@ git commit -m "feat: mcode-tools connector bridge and tdx kline provider"
 - Create: `tests/test_tdx_rows_to_em.py`
 
 **Interfaces:**
-- Consumes: `tdx.fetch_kline` 的返回（Task 5）
+- Consumes: `tdx.fetch_kline` 的返回（Task 5）—— **后复权序列**（`tqFlag="2"`，Global Constraint 16），本任务只做格式转换，不碰复权口径
 - Produces:
   - `agaistock.providers.tdx_rows_to_em.rows_to_em_format(payload: dict) -> dict`
     返回 `{"data": {"klines": ["YYYY-MM-DD,o,c,h,l,v,a", ...], "count": int}}`，**保持升序**。
@@ -1774,7 +2035,7 @@ git commit -m "feat: tdx Rows to eastmoney kline format adapter"
 - Create: `tests/test_chanlun_engine.py`
 
 **Interfaces:**
-- Consumes: `tdx.fetch_kline`（Task 5）、`tdx_rows_to_em.rows_to_em_format`（Task 6）
+- Consumes: `tdx.fetch_kline`（Task 5，**后复权序列** `tqFlag="2"`）、`tdx_rows_to_em.rows_to_em_format`（Task 6）
 - Produces:
   - `agaistock.skills.anchor_chanlun.engine.LEVELS = {"week": "5", "day": "4", "m30": "2"}`
   - `agaistock.skills.anchor_chanlun.engine.LEVEL_ORDER = ("week", "day", "m30")`
@@ -2991,8 +3252,8 @@ git commit -m "feat: llm wording layer with protected field validation and fallb
 - Consumes: `rules.evaluate` / `signals.*`（Task 8）、`wording.phrase`（Task 9）、`build_structure`（Task 7）、`ReviewContext`（Task 3）
 - Produces:
   - `agaistock.skills.anchor_chanlun.reviewer.Reviewer` —— 类，含 `id = "anchor-chanlun"`、`version = "0.1.0"`、`review(ctx: ReviewContext) -> ReviewVerdict`。
-  - `reviewer.fetch_last_close(symbol: str, setcode: str, structure: dict | None = None) -> float` —— 取现价。
-    优先用结构里的 `levels.day.last_close`，没有才退回实时行情接口。
+  - `reviewer.fetch_last_close(symbol: str, setcode: str, structure: dict | None = None) -> float` —— 取现价，**返回后复权空间的价位**。
+    优先用结构里的 `levels.day.last_close`，没有才退回实时行情接口；退回时必须用复权因子把现价换算成后复权（Global Constraint 18）。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -3128,11 +3389,29 @@ def _validation_errors(verdict: ReviewVerdict) -> list[str]:
     return validate_verdict(verdict, dimensions)
 
 
+def _latest_factor_row(symbol: str) -> dict | None:
+    """取该标的最新的复权因子行（现价 → 后复权换算用）。
+
+    点评师拿不到数据库连接（`ReviewContext` 只有 `data_dir`），所以这里直接取一次
+    连接器；`fetch_adjustment_factors` 已按 ex_date 降序，第一行就是最新一行。
+    取不到时返回 None —— 调用方按「无法换算」处理，不要静默当成现价。
+    """
+    try:
+        factors = tdx.fetch_adjustment_factors(symbol)
+    except Exception:  # noqa: BLE001 —— 换算失败不该让整轮点评挂掉
+        return None
+    return factors[0] if factors else None
+
+
 def fetch_last_close(symbol: str, setcode: str, structure: dict | None = None) -> float:
-    """取现价。
+    """取现价（**后复权空间**）。
 
     优先用缠论结构里的 `levels.day.last_close`（上游已算好，省一次连接器调用）；
     结构里没有时才退回实时行情。
+
+    **空间一致性（Global Constraint 16/18）**：结构里的 `last_close` 来自后复权 K 线，
+    已经是后复权空间；实时行情返回的是**现价**（不复权空间），必须用复权因子换算成
+    后复权再返回，否则会拿 10014 去和 1460 比。
     """
     if structure:
         for level_name in ("day", "m30", "week"):
@@ -3148,7 +3427,9 @@ def fetch_last_close(symbol: str, setcode: str, structure: dict | None = None) -
     for key in ("Now", "Close"):
         value = info.get(key)
         if isinstance(value, (int, float)) and value:
-            return float(value)
+            price = float(value)
+            row = _latest_factor_row(symbol)
+            return price if row is None else tdx.to_houfuquan(price, row)
     return 0.0
 
 
@@ -4596,6 +4877,9 @@ git commit -m "feat: mini app api for review, reviews and soft delete"
 
 **Interfaces:**
 - Consumes: Task 14 的 API
+- 复权口径提醒（Global Constraint 16/18）：点评里的中枢 / 支撑压力 / 证伪位都是**后复权空间**的价位。
+  展示时若要让用户和行情软件里的现价对照，**必须**用复权因子换算（`(后复权价 − 复权常数) / 复权因子`），
+  或在文案里明确标注「后复权」口径 —— 不要把后复权价位直接当成现价呈现。
 - Produces:
   - `miniapps/agaistock/miniapp/client/render.mjs` 导出四个纯函数：
     - `renderReviews(reviews: Array) -> string` —— 点评师意见区块 HTML
