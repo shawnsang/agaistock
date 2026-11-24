@@ -87,6 +87,50 @@ class StorageTests(unittest.TestCase):
         a_rows = [r for r in latest if r["reviewer_id"] == "a"]
         self.assertEqual(a_rows[0]["ran_at"], "2026-11-24T09:00:00Z")
 
+    def test_latest_reviews_returns_one_row_when_ran_at_ties(self):
+        """同一 reviewer 两条 ran_at 相同的 review，只能返回一条。"""
+        conn = make_conn()
+        obs_id = db.insert_observation(conn, OBSERVATION)
+        db.insert_review(conn, obs_id, verdict(reviewer_id="a", ran_at="2026-11-24T07:00:00Z"))
+        db.insert_review(conn, obs_id, verdict(reviewer_id="a", ran_at="2026-11-24T07:00:00Z"))
+        latest = db.latest_reviews(conn, obs_id)
+        self.assertEqual(len(latest), 1)
+        self.assertEqual(latest[0]["reviewer_id"], "a")
+        self.assertEqual(latest[0]["ran_at"], "2026-11-24T07:00:00Z")
+
+    def test_insert_observation_keeps_position_json_verbatim(self):
+        """position_json 已是序列化字符串，原样落库，不得被静默丢弃。"""
+        conn = make_conn()
+        observation = dict(OBSERVATION, position_json='{"shares": 1000}')
+        obs_id = db.insert_observation(conn, observation)
+        rows = db.list_observations(conn)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], obs_id)
+        self.assertEqual(rows[0]["position_json"], '{"shares": 1000}')
+
+    def test_insert_observation_serializes_position_dict(self):
+        """position 传 dict 时，序列化后落库。"""
+        conn = make_conn()
+        observation = dict(OBSERVATION)
+        observation.pop("position_json")
+        observation["position"] = {"shares": 1000}
+        db.insert_observation(conn, observation)
+        rows = db.list_observations(conn)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["position_json"], '{"shares": 1000}')
+
+    def test_soft_deleted_observation_keeps_its_reviews(self):
+        """软删观察不隐藏其 reviews —— 全局约束：reviews 保留。"""
+        conn = make_conn()
+        obs_id = db.insert_observation(conn, OBSERVATION)
+        db.insert_review(conn, obs_id, verdict())
+        self.assertTrue(db.soft_delete_observation(conn, obs_id))
+        self.assertEqual(db.list_observations(conn), [])
+        self.assertEqual(len(db.list_observations(conn, include_deleted=True)), 1)
+        latest = db.latest_reviews(conn, obs_id)
+        self.assertEqual(len(latest), 1)
+        self.assertEqual(latest[0]["reviewer_id"], "anchor-chanlun")
+
 
 if __name__ == "__main__":
     unittest.main()

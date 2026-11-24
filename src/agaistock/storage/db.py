@@ -72,6 +72,23 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _position_json(observation: dict[str, Any]) -> str:
+    """把观察里的持仓信息落成 position_json 列的文本。
+
+    同时接受两种键名：
+      - ``position_json``：已序列化的字符串，原样存
+      - ``position``：dict / list，序列化后存
+
+    优先取 ``position_json``，缺失时回退到 ``position``，两者都缺时存 "{}"。
+    """
+    raw = observation.get("position_json")
+    if raw is None:
+        raw = observation.get("position", {})
+    if isinstance(raw, str):
+        return raw
+    return json.dumps(raw, ensure_ascii=False)
+
+
 def insert_observation(conn: sqlite3.Connection, observation: dict[str, Any]) -> str:
     obs_id = observation.get("id") or _new_id("obs")
     conn.execute(
@@ -89,7 +106,7 @@ def insert_observation(conn: sqlite3.Connection, observation: dict[str, Any]) ->
             float(observation.get("confidence") or 0),
             observation.get("timeframe", ""),
             observation.get("trigger", ""),
-            json.dumps(observation.get("position", {}), ensure_ascii=False),
+            _position_json(observation),
             observation.get("raw_text", ""),
             None,
         ),
@@ -139,19 +156,30 @@ def insert_review(conn: sqlite3.Connection, observation_id: str, verdict: dict[s
 
 
 def latest_reviews(conn: sqlite3.Connection, observation_id: str) -> list[dict]:
+    """每位 reviewer 只返回 ran_at 最新的一条，按 ran_at 升序返回。
+
+    ran_at 精度只到秒，同一 reviewer 同一秒内的两次运行会并列；
+    依次用 created_at、rowid（插入顺序）兜底排序，保证每位 reviewer
+    恰好一行，且并列时取后插入的那次运行。
+    """
     rows = conn.execute(
-        """SELECT r.* FROM reviews r
-           JOIN (SELECT reviewer_id, MAX(ran_at) AS mx
-                 FROM reviews WHERE observation_id = ?
-                 GROUP BY reviewer_id) latest
-             ON r.reviewer_id = latest.reviewer_id AND r.ran_at = latest.mx
-           WHERE r.observation_id = ?
-           ORDER BY r.ran_at ASC""",
-        (observation_id, observation_id),
+        """SELECT * FROM (
+               SELECT r.*,
+                      ROW_NUMBER() OVER (
+                          PARTITION BY r.reviewer_id
+                          ORDER BY r.ran_at DESC, r.created_at DESC, r.rowid DESC
+                      ) AS rn
+               FROM reviews r
+               WHERE r.observation_id = ?
+           )
+           WHERE rn = 1
+           ORDER BY ran_at ASC, created_at ASC, id ASC""",
+        (observation_id,),
     )
     result = []
     for row in rows:
         item = dict(row)
+        item.pop("rn", None)
         item["verdict"] = json.loads(item.pop("verdict_json"))
         result.append(item)
     return result
