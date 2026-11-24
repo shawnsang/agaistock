@@ -5,7 +5,6 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from ...providers import tdx
 from ...reviewers.contract import ReviewContext, ReviewVerdict, validate_verdict
@@ -43,6 +42,27 @@ def _latest_factor_row(symbol: str) -> dict | None:
     return factors[0] if factors else None
 
 
+def _quote_price(payload: dict) -> float:
+    """从行情载荷里取现价（**不复权**口径）。
+
+    实测（2026-11-24，`tdx_quotes` 返回 002378）：
+      - 顶层键是 BaseInfo / ExtInfo / **HQInfo** / CalcInfo / ProInfo / ...
+      - `HQInfo.Now` = 15.54（现价）、`HQInfo.Close` = 15.59（收盘价）
+      - **没有 `AttachInfo`** —— 那是 K 线载荷 `tdx_kline` 的元数据，不是行情载荷的。
+        读错字段会让回退路径永远静默返回「现价未知」。
+    两个容器都试一遍，兼容两种载荷形态。
+    """
+    for container in ("HQInfo", "AttachInfo"):
+        info = payload.get(container)
+        if not isinstance(info, dict):
+            continue
+        for key in ("Now", "Close"):
+            value = info.get(key)
+            if isinstance(value, (int, float)) and value:
+                return float(value)
+    return 0.0
+
+
 def fetch_last_close(symbol: str, setcode: str, structure: dict | None = None) -> float:
     """取现价（**后复权空间**）。
 
@@ -63,16 +83,13 @@ def fetch_last_close(symbol: str, setcode: str, structure: dict | None = None) -
         payload = tdx.fetch_quotes(symbol, setcode)
     except Exception:  # noqa: BLE001
         return 0.0
-    info = (payload.get("AttachInfo") or {})
-    for key in ("Now", "Close"):
-        value = info.get(key)
-        if isinstance(value, (int, float)) and value:
-            price = float(value)
-            row = _latest_factor_row(symbol)
-            # 换不到因子行就**不能**返回现价 —— 它不在后复权空间，
-            # 拿它去和后复权的中枢上下沿比会得出错误结论。返回 0.0 表示「未知」。
-            return 0.0 if row is None else tdx.to_houfuquan(price, row)
-    return 0.0
+    price = _quote_price(payload)
+    if not price:
+        return 0.0
+    row = _latest_factor_row(symbol)
+    # 换不到因子行就**不能**返回现价 —— 它不在后复权空间，
+    # 拿它去和后复权的中枢上下沿比会得出错误结论。返回 0.0 表示「未知」。
+    return 0.0 if row is None else tdx.to_houfuquan(price, row)
 
 
 class Reviewer:
