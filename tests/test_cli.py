@@ -70,6 +70,26 @@ class CliTests(unittest.TestCase):
             # 措辞层必须真的接上：ctx.llm 拿到 from_env() 的返回值
             self.assertIs(captured["ctx"].llm, sentinel)
 
+    def test_review_data_dir_comes_from_the_host_env_var(self):
+        # 缠论分析工作目录必须落宿主给的目录（AGAISTOCK_DATA_DIR → context.dataDir），
+        # 不是插件包自己的 data/ —— 包目录是安装产物，可能只读。
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            captured = {}
+
+            def fake_run_reviewers(ctx, reviewers):
+                captured["ctx"] = ctx
+                return []
+
+            with mock.patch.object(cli, "run_reviewers", side_effect=fake_run_reviewers), \
+                 mock.patch.dict(os.environ, {"AGAISTOCK_DATA_DIR": tmp}):
+                code = cli.main([
+                    "review", "--symbol", "002378", "--name", "章源钨业",
+                    "--text", "还能拿半年", "--db", str(db_path), "--json",
+                ])
+            self.assertEqual(code, 0)
+            self.assertEqual(captured["ctx"].data_dir, Path(tmp))
+
     def test_review_closes_the_db_connection_even_when_the_command_fails(self):
         # Windows 上未关闭的 sqlite 句柄会锁住 .db 文件（临时目录删除直接 PermissionError）。
         # 连接必须在 finally 里关 —— 命令中途抛异常时同样要关。

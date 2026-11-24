@@ -1,7 +1,9 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agaistock import config
 
@@ -68,6 +70,26 @@ class ConfigTests(unittest.TestCase):
         # 空注册表 = 产品核心功能整体失效，必须报错而不是静默返回 []。
         with self.assertRaises(ValueError):
             with_config("reviewers.json", '{"reviewers": []}', config.load_reviewers)
+
+
+class DataDirTest(unittest.TestCase):
+    """运行期数据目录（数据库之外的可写工作区）由宿主给。
+
+    插件目录是**安装产物**：可能被重装覆盖，也可能只读安装 ——
+    运行产物不能写在那里。
+    """
+
+    def test_env_var_wins(self):
+        with mock.patch.dict(os.environ, {"AGAISTOCK_DATA_DIR": "/tmp/host-data"}):
+            self.assertEqual(config.data_dir(), Path("/tmp/host-data"))
+
+    def test_falls_back_to_repo_data_dir(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(config.data_dir(), config.repo_root() / "data")
+
+    def test_blank_env_var_is_treated_as_unset(self):
+        with mock.patch.dict(os.environ, {"AGAISTOCK_DATA_DIR": "   "}):
+            self.assertEqual(config.data_dir(), config.repo_root() / "data")
 
 
 if __name__ == "__main__":

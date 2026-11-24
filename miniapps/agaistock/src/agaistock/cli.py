@@ -149,7 +149,7 @@ def cmd_review(args) -> int:
             symbol=args.symbol,
             name=args.name,
             now=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            data_dir=config.repo_root() / "data",
+            data_dir=config.data_dir(),
             # 措辞层接线：环境变量没配全时 from_env() 返回 None → 点评保留规则层原文
             llm=llm_client.from_env(),
         )

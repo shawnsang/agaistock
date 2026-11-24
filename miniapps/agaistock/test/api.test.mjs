@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { handleRoute } from '../miniapp/node/server.mjs';
+import { handleRoute, buildKernelEnv } from '../miniapp/node/server.mjs';
 
 function makeRequest(method, url, body) {
   return {
@@ -272,4 +272,20 @@ test('paths outside the whitelist still return 404', async () => {
     );
     assert.equal(response.statusCode, 404, `${path} 必须 404`);
   }
+});
+
+test('the kernel gets the host data dir, not the installed package dir', () => {
+  const env = buildKernelEnv({ dbPath: 'D:\\host\\data\\agaistock.db', dataDir: 'D:\\host\\data' });
+  assert.equal(env.AGAISTOCK_DB, 'D:\\host\\data\\agaistock.db');
+  assert.equal(env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
+});
+
+test('the kernel env never invents a data dir on its own', () => {
+  const env = buildKernelEnv({});
+  assert.equal(env.AGAISTOCK_DATA_DIR, undefined);
+});
+
+test('a blank data dir is not a usable path', () => {
+  const env = buildKernelEnv({ dataDir: '' });
+  assert.equal(env.AGAISTOCK_DATA_DIR, undefined);
 });

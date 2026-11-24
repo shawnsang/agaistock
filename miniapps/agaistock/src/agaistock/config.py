@@ -5,12 +5,31 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 
 def repo_root() -> Path:
     """仓库根目录：src/agaistock/config.py -> src/agaistock -> src -> 根。"""
     return Path(__file__).resolve().parents[2]
+
+
+DATA_DIR_ENV = "AGAISTOCK_DATA_DIR"
+
+
+def data_dir() -> Path:
+    """运行期数据目录（数据库之外的可写工作区）。
+
+    宿主（Mini App 的 Node 侧）通过 `AGAISTOCK_DATA_DIR` 指向 `context.dataDir`。
+    插件目录是**安装产物**：可能被宿主重装覆盖，也可能以只读方式安装 ——
+    运行期产物不能写在那里。
+
+    未设置时退回 `repo_root()/"data"`（仓库内直接跑 CLI 的开发场景）。
+    """
+    override = os.environ.get(DATA_DIR_ENV, "").strip()
+    if override:
+        return Path(override)
+    return repo_root() / "data"
 
 
 def _load_json(relative_path: str) -> dict:

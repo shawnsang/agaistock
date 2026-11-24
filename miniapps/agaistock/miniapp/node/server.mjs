@@ -104,6 +104,25 @@ const KERNEL_SRC = join(PLUGIN_ROOT, 'src');
 const KERNEL_TIMEOUT_MS = 180000;
 
 /**
+ * 组装内核子进程的环境变量。
+ *
+ * 运行期的两样东西都必须落宿主给的数据目录（`context.dataDir`）：
+ *  - 数据库：AGAISTOCK_DB
+ *  - 缠论分析工作目录：AGAISTOCK_DATA_DIR
+ * 插件目录是**安装产物**（可能被重装覆盖，也可能只读安装），运行产物不能写在那里。
+ */
+export function buildKernelEnv(options = {}) {
+  const env = {
+    ...process.env,
+    PYTHONPATH: options.pythonPath || KERNEL_SRC,
+    PYTHONIOENCODING: 'utf-8',
+  };
+  if (options.dbPath) env.AGAISTOCK_DB = options.dbPath;
+  if (options.dataDir) env.AGAISTOCK_DATA_DIR = options.dataDir;
+  return env;
+}
+
+/**
  * 调用 Python 内核 CLI。
  *
  * Node 侧不碰 sqlite —— 数据库的唯一入口是内核（主规格 D3：接入层是唯一接口）。
@@ -114,9 +133,9 @@ export function runKernel(args, options = {}) {
   const cwd = options.cwd || PLUGIN_ROOT;
   const pythonPath = options.pythonPath || KERNEL_SRC;
   const dbPath = options.dbPath || '';
+  const dataDir = options.dataDir || '';
   return new Promise((resolve) => {
-    const env = { ...process.env, PYTHONPATH: pythonPath, PYTHONIOENCODING: 'utf-8' };
-    if (dbPath) env.AGAISTOCK_DB = dbPath;
+    const env = buildKernelEnv({ pythonPath, dbPath, dataDir });
     // **必须带 `-S`**：editable 安装（`pip install -e .`）注册的是 meta-path finder，
     // 优先级**高于** PYTHONPATH —— 实测开发机上不加 `-S` 时 `import agaistock`
     // 命中的是仓库里那份，不是插件自带的副本，自包含就成了空话。
@@ -458,6 +477,7 @@ export async function start(context) {
     cwd: pluginRoot,
     pythonPath: join(pluginRoot, 'src'),
     dbPath,
+    dataDir,
   });
 
   const server = createServer((request, response) => {
