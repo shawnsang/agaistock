@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -32,6 +34,26 @@ class FakeResponse {
   json() {
     return JSON.parse(this.body);
   }
+}
+
+/**
+ * 造一个**临时插件根**。
+ *
+ * 为什么不用仓库里的 `miniapps/agaistock`：模块常量 `PLUGIN_ROOT` 恰好就等于它，
+ * 于是「`start()` 忽略宿主给的 pluginRoot」这类变异在测试里是**语义空操作** ——
+ * 断言会变成永远不可能失败的空断言（fix round 2 的 Minor 2）。
+ * 复制到 scratch 后，pluginRoot 与模块常量**不同**，断言才有意义。
+ */
+async function makeScratchPluginRoot() {
+  const base = await mkdtemp(join(tmpdir(), 'agaistock-plugin-'));
+  const root = join(base, 'plugin');
+  await mkdir(join(root, 'miniapp', 'client'), { recursive: true });
+  await cp(
+    join(import.meta.dirname, '..', 'miniapp', 'client'),
+    join(root, 'miniapp', 'client'),
+    { recursive: true },
+  );
+  return { base, root };
 }
 
 function fakeKernel(result) {
@@ -343,7 +365,7 @@ test('the kernel subprocess actually receives the host data dir', async () => {
     { dataDir: 'D:\\host\\data' },
     'D:\\pkg',
     (command, argv, options) => {
-      captured.push({ command, argv, env: options.env });
+      captured.push({ command, argv, env: options.env, cwd: options.cwd });
       return fakeChild;
     },
   );
@@ -351,6 +373,7 @@ test('the kernel subprocess actually receives the host data dir', async () => {
   assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
   assert.equal(captured[0].env.AGAISTOCK_DB, join('D:\\host\\data', 'agaistock.db'));
   assert.equal(captured[0].env.PYTHONPATH, join('D:\\pkg', 'src'));
+  assert.equal(captured[0].cwd, 'D:\\pkg');
 });
 
 test('start() hands the host context to the kernel unchanged', async () => {
@@ -358,8 +381,8 @@ test('start() hands the host context to the kernel unchanged', async () => {
   // context 原样，这条就红。start() 若绕过 createKernel 直接调 runKernel，
   // 下面的 seen 会是空的 —— 一样红。
   const seen = [];
-  const pluginRoot = join(import.meta.dirname, '..');
-  const dataDir = join(import.meta.dirname, '..', '..', '..', '.tmp', 'task20-fix2-test-data');
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const dataDir = join(base, 'data');
   const context = {
     dataDir,
     pluginRoot,
@@ -377,10 +400,100 @@ test('start() hands the host context to the kernel unchanged', async () => {
     assert.equal(response.status, 200);
   } finally {
     await handle.dispose();
+    await rm(base, { recursive: true, force: true });
   }
   assert.ok(seen.length > 0, '内核必须真的被调用，且拿到宿主给的 context');
   assert.equal(seen[0].ctx.dataDir, dataDir);
+  // ⚠️ pluginRoot 现在**不等于**模块常量 PLUGIN_ROOT —— 这条断言才有意义。
   assert.equal(seen[0].root, pluginRoot);
+  assert.notEqual(seen[0].root, join(import.meta.dirname, '..', '..'));
   assert.equal(seen[0].dbPath, join(dataDir, 'agaistock.db'));
+});
+
+// ---- 生产路径盲区（fix round 3）----
+test('the default kernel factory hands the host context to the kernel unchanged', async () => {
+  // **不注入 createKernel** —— 宿主不传 deps 时走的就是这条生产路径。
+  // 上一轮的护栏全都绕开了它（它们自己注入 createKernel），
+  // 于是「默认实现把 dataDir 写回插件目录」这种变异能全绿通过（Important 1）。
+  // 这里只把 spawn 换成观测用的假 spawn，其余走**真实默认实现**。
+  const captured = [];
+  const fakeChild = {
+    stdout: { on() {} },
+    stderr: { on() {} },
+    kill() {},
+    on(event, handler) {
+      if (event === 'close') setImmediate(() => handler(0));
+    },
+  };
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const dataDir = join(base, 'data');
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  const handle = await start(context, {
+    spawnFn: (command, argv, options) => {
+      captured.push({ command, argv, env: options.env, cwd: options.cwd });
+      return fakeChild;
+    },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/observations`);
+    assert.equal(response.status, 200);
+  } finally {
+    await handle.dispose();
+    await rm(base, { recursive: true, force: true });
+  }
+  assert.ok(captured.length > 0, '生产路径必须真的 spawn 了内核');
+  assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, dataDir);
+  assert.equal(captured[0].env.AGAISTOCK_DB, join(dataDir, 'agaistock.db'));
+  assert.equal(captured[0].env.PYTHONPATH, join(pluginRoot, 'src'));
+  assert.equal(captured[0].cwd, pluginRoot);
+});
+
+test('start() keeps the observation file in the host data dir, not the plugin dir', async () => {
+  // start() 内部另有一份**局部** dataDir 决定 observations.json 写哪 ——
+  // 它和 context.dataDir 之间没有任何护栏（Important 3）。
+  // 用 scratch 插件根做断言：写错也只污染临时目录，不污染仓库。
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const dataDir = join(base, 'data');
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  const handle = await start(context, {
+    createKernel: () => async () => ({ code: 0, stdout: '{"items":[]}', stderr: '' }),
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/save`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ draft: { symbol: '002378', thesis: 'x' }, rawText: 'x' }),
+    });
+    assert.equal(response.status, 200);
+  } finally {
+    await handle.dispose();
+  }
+  assert.ok(
+    existsSync(join(dataDir, 'observations.json')),
+    '观察卡必须落在宿主给的 dataDir',
+  );
+  assert.ok(
+    !existsSync(join(pluginRoot, 'observations.json')),
+    '观察卡绝不能落进插件目录（那是安装产物）',
+  );
+  await rm(base, { recursive: true, force: true });
+});
+
+test('handleRoute refuses to guess the kernel', async () => {
+  // kernel 必须由调用方显式注入 —— 有默认分支就有盲区。
+  await assert.rejects(
+    () => handleRoute(makeRequest('GET', '/api/observations'), new FakeResponse(), {}),
+    /kernel/,
+  );
 });
 

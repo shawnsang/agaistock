@@ -219,13 +219,17 @@ export async function handleRoute(request, response, options = {}) {
       error: 'UNAVAILABLE',
       message: '解析能力不可用。',
     }),
-    kernel: injectedKernel,
+    kernel,
     dbPath = '',
     dataDir = '',
   } = options;
 
-  // 默认内核也走 context 驱动：只有宿主给了 dataDir 才带上运行路径。
-  const kernel = injectedKernel || ((args) => runKernel(args, { dataDir }));
+  // kernel **必须**显式注入（不再有默认分支）：默认分支在生产路径上不可达，
+  // 却能让「路径被写回插件目录」的变异悄悄溜过全部测试 —— 与 fix round 1
+  // 栽的跟头同构。start() 永远会注入，测试也永远会注入。
+  if (typeof kernel !== 'function') {
+    throw new Error('handleRoute 需要显式注入 kernel');
+  }
 
   // 结构化观察草稿的落地目录：优先用宿主给的数据目录，退回数据库所在目录。
   const draftDir = dataDir || dirname(dbPath);
@@ -414,6 +418,8 @@ async function countObservations(kernel, dbPath) {
 }
 
 export async function start(context, deps = {}) {
+  // 局部 dataDir 与 context.dataDir **必须是同一个**（下面那两条行为断言在守这件事）：
+  // 它决定 observations.json 落哪，也决定内核的运行路径。
   const dataDir = context.dataDir;
   await mkdir(dataDir, { recursive: true });
   const observationsPath = join(dataDir, OBSERVATIONS_FILE);
@@ -500,10 +506,11 @@ export async function start(context, deps = {}) {
   const dbPath = kernelDbPath(context);
 
   // 内核工厂可注入：测试要能观测 start() 到底把什么递给了内核。
-  // 默认实现把**宿主的 context 原样**传给 runKernel —— 中间不再有任何
-  // 可被改写路径的对象，上一轮的缺陷（M8/M9/M14/M15/M16）因此无处可藏。
+  // 默认实现把**宿主的 context 原样**传给 runKernel，并把 `deps.spawnFn` 透传下去 ——
+  // 没有这个透传，**默认实现本身就是盲区**：宿主不传 deps 时走的就是这条生产路径，
+  // 而上一轮的护栏全都自己注入 createKernel，从没观测过它。
   const createKernel = deps.createKernel
-    || ((ctx, root) => (args) => runKernel(args, ctx, root));
+    || ((ctx, root) => (args) => runKernel(args, ctx, root, deps.spawnFn));
   const kernel = createKernel(context, pluginRoot, dbPath);
 
   const server = createServer((request, response) => {

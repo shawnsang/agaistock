@@ -757,4 +757,4 @@ ReviewVerdict
 - `src/agaistock/mcp/` 的 MCP 工具暴露
 - 上游 `resonance` / `window_alignment` / `key_levels` 未接入（设计级，下一轮）
 - `AGAISTOCK_DATA_DIR` 若给的是**相对路径**，会按内核 cwd 解析（安装副本里 cwd 就是包根）→ 将来要加绝对路径守卫；宿主目前总是给绝对路径，暂不可达。
-- 回落值 `repo_root()/"data"` 在**安装副本里指向包内** —— 环境变量是唯一的护栏，宿主侧一旦回归，缺陷会静默复活。（`buildKernelEnv(context, pluginRoot)` 直接吃宿主 context 算出内核运行路径，中间没有任何可被覆写的对象；三层**行为**护栏锁住它 —— env 纯函数 / 真实 spawn 路径 / `start()` 注入点 —— 能挡住本仓库内的改动，但**挡不住宿主侧回归**。）
+- 回落值 `repo_root()/"data"` 在**安装副本里指向包内** —— 环境变量是唯一的护栏，宿主侧一旦回归，缺陷会静默复活。（`buildKernelEnv(context, pluginRoot)` 直接吃宿主 context 算出内核运行路径，中间没有任何可被覆写的对象；三层**行为**护栏锁住它 —— env 纯函数 / 真实 spawn 路径 / `start()` 注入点 / **默认内核工厂** —— **能挡住本仓库内已被护栏覆盖到的改动**；**未覆盖的路径仍无护栏**，宿主侧回归同样挡不住。）

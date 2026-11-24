@@ -8143,14 +8143,16 @@ work_dir.mkdir(parents=True, exist_ok=True)
    （安装副本的 `package/data/chanlun/002378/` 下有 8 个文件；来源见下面的注）。
    `data/` 已被 `.gitignore` 忽略，所以这些文件**不随包发布**，但每次运行都会在
    安装目录里重新生成一批。
-   > **来源说明**：这 8 个文件是**运行时写的**，不是宿主拷进去的 —— 可复现的证据是
-   > **时序**：安装副本解包于 `2026-11-24T21:59:05Z`，而
-   > `package/src/agaistock/providers/__pycache__/mcode_cli.cpython-311.pyc`
-   > 的 mtime 是 `2026-11-24T22:00:32Z` —— **晚于解包 87 秒** ⇒ 确证是运行时写的。
-   > （安装副本里共 24 个 `.pyc`，与仓库里 mtime 相同的 **0** 个 ——
-   > **不要**再声称「宿主把 gitignored 产物拷进安装副本」，那句话不成立。）
-   > 缺陷本身由**代码 + 只读安装复现**证明（不复现时 `work_dir.mkdir` 抛
-   > `PermissionError`），不靠文件计数。
+   > **来源说明**：这 8 个 `data/chanlun/002378/*.json` 是**运行时写的** ——
+   > 仓库插件包、宿主持久安装目录、运行时解包副本**三处都没有 `data/` 目录**，
+   > 它们只存在于宿主 `context.dataDir` 下。
+   > ⚠️ 但**不要**把这条推广成「宿主不会拷 gitignored 产物」—— **那个一般命题是成立的**：
+   > 实测仓库插件包 `miniapps/agaistock/src/agaistock/**` 的 24 个 `.pyc` 与宿主持久安装目录
+   > `~/.minimax/plugins/agaistock/src/agaistock/**` 的 24 个 `.pyc` **mtime 24/24 完全相同**，
+   > 其中 18 个还**早于**运行时解包时刻 ⇒ 这批 `.pyc` 确实是宿主拷进去的
+   > （`__pycache__` 是 gitignored 产物）。
+   > ⇒ **来源不可泛化**：文件计数、某个 `.pyc` 的 mtime，都不能用来推断别的文件的来源。
+   > 缺陷本身由**代码 + 只读安装复现**证明，不靠文件计数。
 2. **只读安装会直接崩**：`work_dir.mkdir(parents=True, exist_ok=True)` 在只读目录上抛
    `PermissionError` → 点评师整体失败 → 正是 Task 17 想根除的那类「内核失败被隐藏」。
 
@@ -8566,10 +8568,8 @@ export function buildKernelEnv(options = {}) {
 2. **本计划 Task 20 小节**里「上游脚本产出的 K 线与结构 JSON 落进插件包目录」
    收窄来源声明。
    > ⚠️ **本条在 fix round 1 没有执行，而且它写下来的来源判断本身是错的**：
-   > 文件数是 **8** 个不是 9 个；「宿主**会把 gitignored 产物一并拷进安装副本**
-   > （安装副本里的 `.pyc` 的 mtime 与仓库里的一致）」**不成立** ——
-   > 实测安装副本 24 个 `.pyc`，与仓库 mtime 相同的 **0** 个。
-   > 实际订正见 **fix round 2 的 Step 3 第 3 条**（用「解包时刻 vs `.pyc` mtime」的时序证据）。
+   > 文件数是 **8** 个不是 9 个；**来源判断不可判定**（见 fix round 2 Step 3 第 3 条与
+   > fix round 3 Step 3 第 1 条）。
    > 缺陷本身由**代码 + 只读安装复现**证明（不复现时 `work_dir.mkdir` 抛 `PermissionError`），
    > 不靠文件计数。
 3. **本计划较早任务小节**（Task 13 的 CLI 段，约第 5029 行）残留的
@@ -8637,6 +8637,10 @@ git commit -m "fix: guard the host data dir wiring and make the kernel env herme
 > 再打上 13 组变异（M8/M9/M14/M15/M16/C4 + 7 组额外回归形态），
 > **13 组全部被护栏捕获，且每组红的是护栏集合里的测试**（不是无关测试碰巧红）。
 > 实现时若测试名与本节写法一致，这套判据可直接复用。
+
+> ⚠️ **本小节已被 fix round 3 补充**：默认内核工厂与 `start()` 局部 `dataDir`
+> 两处盲区已补（见下面 `### Task 20 · fix round 3` 小节）——
+> **别照着本小节 Step 2e 的默认实现写法实现**（它没把 `deps.spawnFn` 透传下去）。
 
 **Minor 1（headline）：fix round 1 的源码断言只锚定「调用点字面量存在」，没有验证数据流。**
 
@@ -8987,11 +8991,12 @@ export async function start(context, deps = {}) {
    要 POSIX 只读安装才能验），别把它写成已验证事实。
 3. **计划 Task 20 小节**（约 8143 行）：「实测 9 个文件」→ **8 个**；
    并把「宿主会把 gitignored 产物一并拷进安装副本（`.pyc` mtime 与仓库里一致）」这句
-   **换掉**——控制器已复核：安装副本 24 个 `.pyc`，与仓库 mtime 相同的 **0** 个；
-   可复现的证据是**时序**：安装副本解包于 `2026-11-24T21:59:05Z`，
-   而 `package/src/agaistock/providers/__pycache__/mcode_cli.cpython-311.pyc`
-   的 mtime 是 `2026-11-24T22:00:32Z` —— **晚于解包 87 秒** ⇒ 确证是运行时写的。
-   **不要**再声称「宿主把 gitignored 产物拷进安装副本」。
+   **换掉**—— ⚠️ **fix round 3 已复核：本条写下的来源结论方向反了**：
+   当时认定「安装副本 24 个 `.pyc`，与仓库 mtime 相同的 **0** 个 ⇒ 宿主不拷 gitignored 产物」，
+   但控制器实测**宿主持久安装目录**的 24 个 `.pyc` 与仓库插件包的 **mtime 24/24 完全相同**
+   （其中 18 个**早于**运行时解包时刻）⇒ 「宿主会拷 gitignored 产物」这个一般命题**成立**。
+   那 8 个 `data/chanlun/002378/*.json` 仍是**运行时写的**（三处安装目录都没有 `data/`）——
+   ⇒ **来源不可泛化**，正确表述见 **fix round 3 Step 3 第 1 条**。
 4. **计划里指向 `.tmp/task20-fix/check_m6_m7.py` 的地方**（约 8389、8589 行）：
    注明「仅本地脚本，被 `.gitignore` 忽略，不在仓库里」。
 5. **计划 fix round 1 小节**（约 8381 行）：加一句「本小节**已被 fix round 2 取代**
