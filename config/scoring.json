@@ -1,0 +1,9 @@
+{
+  "dimensions": [
+    { "name": "事实锚定", "weight": 0.25 },
+    { "name": "证伪条件", "weight": 0.25 },
+    { "name": "逻辑链条", "weight": 0.20 },
+    { "name": "位置与时机", "weight": 0.15 },
+    { "name": "一致性", "weight": 0.15 }
+  ]
+}
