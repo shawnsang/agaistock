@@ -7605,7 +7605,7 @@ Task 16 实测（安装副本里走完整条链路）：
 - [ ] **Step 0: 先修 Task 18 引入的一处回归：空版本号的点评师会让整轮崩掉**
 
 `src/agaistock/reviewers/engine.py` 里三处 `getattr(reviewer, "version", "0.0.0")`
-只在属性**不存在**时用占位版本；属性存在但为空串时拿到的是 `""`。
+只在属性**不存在**时用默认版本；属性存在但为空串时拿到的是 `""`。
 Task 18 之后 `db.insert_review` 把 `reviewer_version` 变成必填（空值抛 ValueError），
 而落库在异常隔离**之外** —— 于是「一个点评师定义的版本号是空的」会从
 「这一条点评是 error」升级成「整轮点评崩掉」。
@@ -7614,7 +7614,7 @@ Task 18 之后 `db.insert_review` 把 `reviewer_version` 变成必填（空值�
 
 ```python
 def _reviewer_version(reviewer) -> str:
-    """点评师版本号；空值用占位版本。
+    """点评师版本号；空值用默认版本。
 
     空版本号会被 db.insert_review 拒绝落库（reviewer_version 是必填），
     而落库在异常隔离之外 —— 不能让「一个点评师定义有问题」变成「整轮崩掉」。
