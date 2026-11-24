@@ -6294,7 +6294,7 @@ Expected: runtime `running`，open 成功。
 
 1. 填入口述文本：`章源钨业我看了三年了，钨价从去年就开始涨，公司储量排前列，明年上半年产量能翻倍。我觉得还能拿半年。`
 2. 点击「解析成观察卡」→ 确认观察卡渲染正常
-3. 点击「保存并点评」→ 确认：
+3. 点击「存进观察库」→ 确认：
    - 「点评师意见」区出现 `anchor-chanlun`
    - 至少 1 条 finding，且显示 `dimension` 与 `delta`
    - 「建议的证伪条件」区块：本轮结构识别出了中枢就出现且带「采纳」按钮；
@@ -6950,6 +6950,616 @@ git commit -m "feat: ship the kernel inside the mini app bundle and surface kern
 > **必须用明确路径，不要 `git add -A`**（Global Constraint 14）。
 > `miniapps/agaistock/src` 与 `miniapps/agaistock/config` 是本轮**新增**的目录，
 > 必须显式 add 进去。
+
+---
+
+### Task 18: 内核健壮性与防御性修复 —— 编码崩溃、观察期落点、配置/存储校验
+
+> **来源**：Task 16 端到端实测（第二轮）+ 最终评审的 deferred minors triage。
+> 本任务不新增业务能力，只把「会在真实机器上崩掉或悄悄丢数据」的地方修掉。
+
+**缺陷四（Critical）：Windows 中文机器上，点评流程会间歇性整轮崩掉。**
+
+Task 16 在真实安装副本里点「存进观察库」，界面直接报：
+
+```
+点评失败：... File "cli.py", line 103, in cmd_review
+  print(json.dumps(payload, ensure_ascii=False, indent=2))
+UnicodeEncodeError: 'gbk' codec can't encode character '\ufffd' in position 501
+```
+
+因果链（三段，每一段都实测过）：
+
+1. **连接器解码**：`providers/mcode_cli.py` 用 `text=True, encoding="utf-8", errors="replace"`
+   读 `mcode-tools` 的 stdout。`mcode-tools` 的输出**偶尔含非法 UTF-8 字节**
+   （上游数据源编码不统一），`errors="replace"` 把它们变成 **U+FFFD**。
+2. **CLI 输出**：Windows 中文机器上 Python 的 stdout 编码是 **GBK**（控制台代码页）。
+   `print(json.dumps(..., ensure_ascii=False))` 遇到 GBK 编不出来的 U+FFFD → `UnicodeEncodeError`。
+3. **后果**：`cmd_review` 在落完 observation 之后崩在 print 上 —— 用户看到「点评失败」，
+   点评、评分、观察期全部没有，但 observation 已经插进库了。
+
+**这是间歇性的**：连接器输出含非法字节时才触发（控制器复跑 3 次只有 1 次中招），
+所以它会在用户最不该遇到的时候炸。
+
+**缺陷五（Confirmed bug）：显式 `review_at` 落在周日，且可能落在允许窗口之外。**
+
+控制器实测：`start=2026-11-20`（周五）、`review_at=2026-11-29`（**周日**）、
+tier=`short`（allowed=(3,5)）→ 选中的 `review_at` 是 **2026-11-29，周日**；
+而 `allowed_window` 是 `['2026-11-20', '2026-11-27']` —— **选中的日期在窗口之外**。
+交易日偏移算出来是 5（在 allowed 里）所以没触发回退，但日期本身既不是交易日、
+也越过了窗口上限。
+
+**其余（本任务的防御性修复，triage 编号见 progress.md）**
+- TRIAGE-01：`config._load_json` 顶层不是 dict 时抛 AttributeError，而不是可读的 ValueError。
+- TRIAGE-02：`load_reviewers` 允许空注册表静默返回 `[]` —— 等于每条观察都「无人点评」，
+  看起来像正常结果。必须 fail fast。
+- TRIAGE-03：config 的四条 ValueError 分支零测试覆盖。
+- TRIAGE-05：`db.insert_adjustment_factors` 无 rollback —— 循环中途失败时已写入的部分
+  留在事务里，会被之后无关的 commit 一起提交，复权因子表变成半截数据。
+- TRIAGE-06：`db.insert_review` 的默认值绕过 NOT NULL（`""` 满足约束）。
+- TRIAGE-08：`db.list_observations` 的 `ORDER BY created_at DESC` 无 tiebreak
+  （`created_at` 只到秒，同秒插入顺序不确定）。
+- TRIAGE-15-1：「未白名单路径仍 404」这条安全不变量没有测试锁定。
+- Task 17 implementer 报的偏差 3：`obsEmpty.textContent` 被改成错误文案后**不复位**，
+  内核恢复后仍显示旧的错误文案。
+
+**Files:**
+- Modify: `src/agaistock/providers/mcode_cli.py`
+- Modify: `src/agaistock/cli.py`
+- Modify: `src/agaistock/horizon.py`
+- Modify: `src/agaistock/config.py`
+- Modify: `src/agaistock/storage/db.py`
+- Modify: `src/agaistock/reviewers/contract.py`
+- Modify: `miniapps/agaistock/miniapp/node/server.mjs`
+- Modify: `miniapps/agaistock/miniapp/client/index.html`
+- Modify: `tests/test_mcode_cli.py`、`tests/test_cli.py`、`tests/test_horizon.py`、`tests/test_config.py`、`tests/test_storage.py`、`tests/test_contract.py`
+- Modify: `miniapps/agaistock/test/api.test.mjs`
+
+> **内核副本同步**：`src/agaistock/**` 与 `config/**` 改动后**必须**跑
+> `python tools/sync-kernel.py`（Task 17 引入），否则 `tests/test_kernel_vendor.py`
+> 的漂移守卫会红 —— 这是设计好的：副本和源必须逐字节一致。
+
+- [ ] **Step 1: 连接器输出改成「先严格 UTF-8，再 GBK，最后才替换」**
+
+`src/agaistock/providers/mcode_cli.py`：
+
+```python
+def _decode_output(raw: bytes) -> str:
+    """解码连接器输出：先严格 UTF-8，再 GBK，最后才替换。
+
+    `errors="replace"` 会把非法字节变成 U+FFFD，而 **U+FFFD 在 GBK 控制台里
+    编不出来** —— CLI 用 print() 输出 JSON 时会直接抛 UnicodeEncodeError，
+    整轮点评全废（Task 16 实测）。所以这里宁可多试一种编码，也不要产出 U+FFFD。
+    """
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+```
+
+`call_connector` 里的子进程调用改成拿字节（不再用 `text=True`）：
+
+```python
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                timeout=timeout,
+                shell=True,
+            )
+        except FileNotFoundError as exc:
+            raise MCodedToolsMissing(
+                "未找到 mcode-tools CLI；请确认 MCode 运行时在 PATH 中"
+            ) from exc
+
+    stdout = _decode_output(result.stdout or b"").strip()
+    stderr = _decode_output(result.stderr or b"").strip()
+
+    if result.returncode != 0:
+        if _looks_like_missing_cli(stderr):
+            raise MCodedToolsMissing("未找到 mcode-tools CLI；请确认 MCode 运行时在 PATH 中")
+        raise RuntimeError(f"连接器 {tool} 调用失败(exit={result.returncode}): {stderr[:500]}")
+
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"连接器 {tool} 返回非 JSON: {stdout[:300]}") from exc
+```
+
+> 注意：`stderr` 的解码也要走 `_decode_output`，否则错误信息里又会出现 U+FFFD。
+
+- [ ] **Step 2: CLI 强制 UTF-8 输出（管道）/ 放宽错误处理（终端）**
+
+`src/agaistock/cli.py`，在 `main()` 之前加：
+
+```python
+def _force_utf8_stdio() -> None:
+    """管道场景强制 UTF-8，终端场景只放宽 errors。
+
+    Windows 中文机器上 Python 的 stdout 编码是 GBK（控制台代码页）。
+    CLI 用 print() 输出 JSON 时，遇到一个 GBK 编不出来的字符（实测：连接器
+    输出里的 U+FFFD）就会抛 UnicodeEncodeError —— 用户看到的是「点评失败」，
+    整轮点评全废。
+
+    - **管道**（stdout 不是 TTY）：JSON 是给 Node 侧解析的机器间通道，
+      必须 UTF-8，不能受控制台代码页影响。
+    - **终端**（是 TTY）：保留控制台编码（否则中文会变乱码），
+      只把 errors 放宽成 replace —— 宁可显示一个替换字符，也不能崩。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            if stream.isatty():
+                reconfigure(errors="replace")
+            else:
+                reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            # 流已关闭或不支持重配置：不能因此让命令失败
+            pass
+```
+
+`main()` 里第一行调用它：
+
+```python
+def main(argv: list[str] | None = None) -> int:
+    _force_utf8_stdio()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+```
+
+- [ ] **Step 3: Node 侧双保险**
+
+`miniapps/agaistock/miniapp/node/server.mjs` 的 `runKernel`：
+
+```javascript
+    const env = { ...process.env, PYTHONPATH: pythonPath, PYTHONIOENCODING: 'utf-8' };
+    if (dbPath) env.AGAISTOCK_DB = dbPath;
+    const child = spawn('python', ['-S', '-m', 'agaistock.cli', ...args], {
+      cwd,
+      env,
+      encoding: 'utf8',
+    });
+```
+
+> `PYTHONIOENCODING=utf-8` 让内核的 stdout 无论控制台代码页是什么都是 UTF-8；
+> `encoding: 'utf8'` 让 Node 按 UTF-8 读子进程输出。两层都要 ——
+> 内核侧修了（Step 2）只是让 CLI 单独用也安全，这里再兜一层底。
+
+- [ ] **Step 4: 观察期落点修正（周末 + 窗口越界）**
+
+`src/agaistock/horizon.py`，加一个交易日推进函数：
+
+```python
+def _next_trading_day(day: date) -> date:
+    """把日期推进到下一个交易日（周末顺延；节假日未处理，仅作近似）。"""
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    return day
+```
+
+`plan()` 里把用户指定的日期先推进到交易日，**再**算偏移：
+
+```python
+    start_date = date.fromisoformat(start)
+    if review_at:
+        # 先推进到交易日再算偏移：结算日落在周末毫无意义。
+        # 而且推进后偏移可能冲出 allowed —— 下面那条回退分支会把它收回来，
+        # 保证 review_at 既是非交易日、也一定落在 allowed_window 之内。
+        chosen = _next_trading_day(date.fromisoformat(review_at))
+        # 用**交易日**偏移校验，不要用日历日差 —— 档位里的天数是交易日偏移。
+        offset = _trading_days_between(start_date, chosen)
+        if allowed and offset not in allowed:
+            # 用户指定的日期不在允许档位内 → 落到档位内最早的那个，
+            # 并同步收窄窗口，保证 review_at 一定落在 allowed_window 之内。
+            allowed = (min(allowed),)
+            chosen = _trading_days_later(start_date, min(allowed))
+```
+
+- [ ] **Step 5: config 的可读报错 + 空注册表 fail fast**
+
+`src/agaistock/config.py`：
+
+```python
+def _load_json(relative_path: str) -> dict:
+    """读仓库内的 JSON 配置。
+
+    顶层不是 JSON 对象时要给**可读**的错：直接 `.get()` 会抛 AttributeError，
+    用户看到的是一段没有上下文的栈回溯，而不是「配置文件坏了」。
+    """
+    path = repo_root() / relative_path
+    with path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{relative_path} 顶层必须是 JSON 对象，实际是 {type(data).__name__}"
+        )
+    return data
+```
+
+`load_reviewers()` 里加空注册表的检查：
+
+```python
+    reviewers = data.get("reviewers")
+    if not isinstance(reviewers, list):
+        raise ValueError("config/reviewers.json 缺少 reviewers")
+    if not reviewers:
+        # 空注册表 = 产品核心功能整体失效。静默返回 [] 会让每条观察都
+        # 「无人点评」，看起来像正常结果 —— 必须 fail fast。
+        raise ValueError("config/reviewers.json 的 reviewers 为空：没有点评师就没有点评")
+```
+
+- [ ] **Step 6: db 的 rollback、NOT NULL 与排序 tiebreak**
+
+`src/agaistock/storage/db.py`：
+
+**6.1** `insert_adjustment_factors` 加 rollback：
+
+```python
+def insert_adjustment_factors(
+    conn: sqlite3.Connection, symbol: str, factors: list[dict[str, Any]]
+) -> int:
+    """写入复权因子；同一 (symbol, ex_date) 重复写入覆盖。
+
+    任何一条失败都必须回滚：否则已写入的部分会留在事务里，
+    被之后无关的 commit 一起提交 —— 复权因子表变成半截数据，
+    而复权价是后复权口径的地基。
+    """
+    fetched_at = _now()
+    try:
+        for item in factors:
+            conn.execute(
+                """INSERT INTO adjustment_factors
+                   (symbol, ex_date, factor, constant, fetched_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(symbol, ex_date) DO UPDATE SET
+                       factor = excluded.factor,
+                       constant = excluded.constant,
+                       fetched_at = excluded.fetched_at""",
+                (
+                    str(symbol),
+                    str(item["ex_date"]),
+                    float(item["factor"]),
+                    float(item["constant"]),
+                    fetched_at,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return len(factors)
+```
+
+**6.2** `insert_review` 不再用默认值绕过 NOT NULL：
+
+```python
+def insert_review(conn: sqlite3.Connection, observation_id: str, verdict: dict[str, Any]) -> str:
+    """落一条点评结论。
+
+    reviewer_id / reviewer_version / status 是**必填**的：它们不是「有则存之」的可选列 ——
+    latest_reviews 靠 reviewer_id 分组取最新一版，空的 reviewer_id 会分出一个
+    伪分组；空的 status 会让「这条点评成功还是失败」无从判断。
+    """
+    for field in ("reviewer_id", "reviewer_version", "status"):
+        if not str(verdict.get(field, "") or "").strip():
+            raise ValueError(f"点评结论缺少必填字段 {field}: {verdict.get('reviewer_id', '')}")
+    review_id = _new_id("rev")
+    conn.execute(
+        """INSERT INTO reviews
+           (id, observation_id, reviewer_id, reviewer_version, ran_at, status,
+            duration_ms, verdict_json, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (
+            review_id,
+            observation_id,
+            verdict["reviewer_id"],
+            verdict["reviewer_version"],
+            verdict.get("ran_at", ""),
+            verdict["status"],
+            int(verdict.get("duration_ms") or 0),
+            json.dumps(verdict, ensure_ascii=False),
+            _now(),
+        ),
+    )
+    conn.commit()
+    return review_id
+```
+
+**6.3** `list_observations` 加 tiebreak：
+
+```python
+    sql += " ORDER BY created_at DESC, rowid DESC"
+```
+
+> `created_at` 只到秒：同一秒内插入两条时，没有 tiebreak 的顺序是不确定的，
+> 列表会在两次刷新之间自己变。加 `rowid DESC` 后「后插入的排前面」，
+> 与「新的在前」的语义一致。
+
+- [ ] **Step 7: 契约层补 reviewer_version 校验（让坏点评师被隔离，而不是整轮崩）**
+
+`src/agaistock/reviewers/contract.py` 的 `validate_verdict` 里，紧跟着 reviewer_id 那一行加：
+
+```python
+    if not verdict.reviewer_id:
+        errors.append("reviewer_id 为空")
+    if not verdict.reviewer_version:
+        errors.append("reviewer_version 为空")
+```
+
+> **为什么在契约层加、而不是只靠 db 层**：db 层现在会抛 ValueError，但 `persist()`
+> 在 `run_one` 的异常隔离**之外** —— 抛出来就是整轮点评失败。
+> 在契约层拦下来，坏结论会变成 `status="error"` 的 verdict（逐点评师隔离），
+> db 层只是最后一道兜底。
+
+- [ ] **Step 8: 前端错误文案复位**
+
+`miniapps/agaistock/miniapp/client/index.html` 的 `loadObservations` 里，
+在成功分支补一句复位：
+
+```javascript
+              var items = (data && data.items) || [];
+              obsCount.textContent = items.length;
+              runtimeState.count = items.length;
+              renderChip();
+              // 内核恢复后要把上一次的错误文案清掉，否则会一直显示旧错误。
+              obsEmpty.textContent = '还没有观察记录。';
+```
+
+- [ ] **Step 9: 补测试**
+
+**9.1 `tests/test_mcode_cli.py`** —— 连接器解码：
+
+```python
+class DecodeOutputTest(unittest.TestCase):
+    def test_prefers_utf8(self):
+        from agaistock.providers.mcode_cli import _decode_output
+        self.assertEqual(_decode_output("章源钨业".encode("utf-8")), "章源钨业")
+
+    def test_falls_back_to_gbk_instead_of_replacement_char(self):
+        from agaistock.providers.mcode_cli import _decode_output
+        # b'\xd5\xc5' 是「章」的 GBK 字节：非法 UTF-8，但合法 GBK。
+        # 老实现 errors="replace" 会把它变成 U+FFFD —— 那正是崩掉整轮点评的元凶。
+        decoded = _decode_output(b"\xd5\xc5")
+        self.assertEqual(decoded, "章")
+        self.assertNotIn("\ufffd", decoded)
+
+    def test_replacement_char_only_as_last_resort(self):
+        from agaistock.providers.mcode_cli import _decode_output
+        # 既不是合法 UTF-8 也不是合法 GBK 的字节：只能替换，但不能抛。
+        self.assertIsInstance(_decode_output(b"\x80"), str)
+```
+
+**9.2 `tests/test_cli.py`** —— CLI 在管道里遇到 U+FFFD 不崩：
+
+```python
+    def test_json_output_survives_unencodable_char(self):
+        """Windows 中文机器上 stdout 是 GBK：输出里有一个 GBK 编不出来的字符时，
+        整条命令不能崩。"""
+        import subprocess
+        import sys
+        from agaistock.storage import db
+
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "t.db"
+            conn = db.connect(db_path)
+            db.migrate(conn)
+            db.insert_observation(conn, {
+                "symbol": "002378",
+                "name": "章\ufffd源钨业",
+                "direction": "bullish",
+                "thesis": "含替换字符的主张\ufffd",
+                "raw_text": "原始文本",
+            })
+            conn.close()
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(repo_root / "src")
+            env["PYTHONIOENCODING"] = ""  # 故意清掉，逼 CLI 自己处理
+            result = subprocess.run(
+                [sys.executable, "-m", "agaistock.cli", "list", "--db", str(db_path), "--json"],
+                cwd=repo_root, env=env, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(len(payload["items"]), 1)
+            self.assertIn("\ufffd", payload["items"][0]["name"])
+```
+
+> 这条测试跑的是**真实子进程**（不是 mock），所以它真的经过「GBK stdout 打印
+> 一个编不出来的字符」这条路径。`PYTHONIOENCODING=""` 是为了让环境不替我们
+> 兜底 —— 正是要验 CLI 自己能不能扛住。
+> `json` / `os` / `tempfile` / `Path` 本文件已经 import 了，`db` 在方法内单独 import。
+
+**9.3 `tests/test_horizon.py`** —— 周末落点（沿用文件里已有的 `verdict_with_tier`）：
+
+```python
+    def test_explicit_review_at_on_weekend_lands_on_trading_day(self):
+        # 2026-11-29 是周日：结算日不能落在非交易日。
+        # 推进到交易日后偏移可能冲出 allowed —— 回退分支必须把它收回来，
+        # 保证 review_at 既是非交易日、也落在 allowed_window 之内。
+        from datetime import date
+        plan_result = plan(
+            {"symbol": "002378", "thesis": "t"},
+            [verdict_with_tier("a", "short")],
+            start="2026-11-20",
+            review_at="2026-11-29",
+        )
+        chosen = date.fromisoformat(plan_result["review_at"])
+        self.assertLess(chosen.weekday(), 5, "review_at 不能落在周末")
+        start, end = plan_result["allowed_window"]
+        self.assertGreaterEqual(chosen, date.fromisoformat(start))
+        self.assertLessEqual(chosen, date.fromisoformat(end))
+```
+
+> `verdict_with_tier(reviewer_id, tier)` 是本文件里已有的模块级函数，直接用，
+> 不要另造一个。
+
+**9.4 `tests/test_config.py`** —— config 的六条分支（本文件现在没有临时配置helper，要加一个）：
+
+```python
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from agaistock import config
+
+
+def with_config(filename, content, func):
+    """把 config 的仓库根临时指向一个只含指定配置文件的临时目录。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "config").mkdir()
+        (root / "config" / filename).write_text(content, encoding="utf-8")
+        original = config.repo_root
+        config.repo_root = lambda: root
+        try:
+            return func()
+        finally:
+            config.repo_root = original
+```
+
+```python
+    def test_non_dict_top_level_raises_value_error(self):
+        # 顶层是数组时不能抛 AttributeError，要给可读的 ValueError。
+        with self.assertRaises(ValueError):
+            with_config("scoring.json", "[1, 2, 3]", config.load_scoring)
+
+    def test_scoring_missing_dimensions_raises(self):
+        with self.assertRaises(ValueError):
+            with_config("scoring.json", '{"other": 1}', config.load_scoring)
+
+    def test_scoring_dimension_missing_field_raises(self):
+        payload = json.dumps({"dimensions": [{"name": "事实锚定"}]})
+        with self.assertRaises(ValueError):
+            with_config("scoring.json", payload, config.load_scoring)
+
+    def test_reviewers_missing_registry_raises(self):
+        with self.assertRaises(ValueError):
+            with_config("reviewers.json", '{"other": 1}', config.load_reviewers)
+
+    def test_reviewer_missing_field_raises(self):
+        payload = json.dumps({"reviewers": [{"id": "anchor-chanlun"}]})
+        with self.assertRaises(ValueError):
+            with_config("reviewers.json", payload, config.load_reviewers)
+
+    def test_empty_reviewer_registry_fails_fast(self):
+        # 空注册表 = 产品核心功能整体失效，必须报错而不是静默返回 []。
+        with self.assertRaises(ValueError):
+            with_config("reviewers.json", '{"reviewers": []}', config.load_reviewers)
+```
+
+> `config.repo_root` 是模块级函数，`_load_json` 内部按 `repo_root()` 调用，
+> 所以临时替换 `config.repo_root` 就能把配置指向临时目录 —— 已有测试
+> `test_load_scoring_returns_five_fixed_dimensions` 之类仍然读真实配置，不受影响。
+
+**9.5 `tests/test_storage.py`** —— db 的三条（沿用文件里已有的 `make_conn()` / `verdict()`）：
+
+```python
+    def test_adjustment_factor_write_rolls_back_on_failure(self):
+        # 第二条因子缺 ex_date → 整体失败，第一条也不能留在事务里。
+        conn = make_conn()
+        with self.assertRaises(KeyError):
+            db.insert_adjustment_factors(conn, "002378", [
+                {"ex_date": "2026-01-01", "factor": 1.0, "constant": 0.0},
+                {"factor": 1.0, "constant": 0.0},
+            ])
+        count = conn.execute("SELECT COUNT(*) FROM adjustment_factors").fetchone()[0]
+        self.assertEqual(count, 0, "失败后必须回滚，不能留下半截数据")
+
+    def test_insert_review_rejects_empty_reviewer_id(self):
+        conn = make_conn()
+        with self.assertRaises(ValueError):
+            db.insert_review(conn, "obs_1", {
+                "reviewer_id": "", "reviewer_version": "0.1.0", "status": "ok",
+            })
+
+    def test_list_observations_tiebreak_is_stable(self):
+        # 两条 created_at 完全相同：顺序必须确定（后插入的在前）。
+        conn = make_conn()
+        for index in range(2):
+            db.insert_observation(conn, {
+                "id": f"obs_{index}", "symbol": "002378", "name": "x",
+                "created_at": "2026-11-24T10:00:00+00:00", "direction": "bullish",
+            })
+        first = [row["id"] for row in db.list_observations(conn)]
+        second = [row["id"] for row in db.list_observations(conn)]
+        self.assertEqual(first, second)
+        self.assertEqual(first, ["obs_1", "obs_0"])
+```
+
+**9.6 `tests/test_contract.py`** —— reviewer_version（沿用文件里已有的 `contract.` 调用风格）：
+
+```python
+    def test_empty_reviewer_version_is_rejected(self):
+        verdict = contract.ReviewVerdict(
+            reviewer_id="anchor-chanlun",
+            reviewer_version="",
+            ran_at="2026-11-24T07:30:00Z",
+            status="ok",
+            duration_ms=0,
+            data_refs=[],
+            findings=[],
+            proposed_invalidation=[],
+            horizon_hint=None,
+            caveats=[],
+        )
+        errors = contract.validate_verdict(verdict, ["位置与时机"])
+        self.assertTrue(any("reviewer_version" in err for err in errors))
+```
+
+**9.7 `miniapps/agaistock/test/api.test.mjs`** —— 非白名单路径仍 404：
+
+```javascript
+test('paths outside the whitelist still return 404', async () => {
+  // 「只白名单这一个文件」是本服务的安全不变量：换成通用静态服务就会路径穿越。
+  for (const path of ['/index.html', '/client/render.mjs', '/etc/passwd', '/render.mjs/']) {
+    const response = new FakeResponse();
+    await handleRoute(
+      makeRequest('GET', path),
+      response,
+      { renderModule: 'export const renderScore = () => "";\n', kernel: fakeKernel({}) },
+    );
+    assert.equal(response.statusCode, 404, `${path} 必须 404`);
+  }
+});
+```
+
+- [ ] **Step 10: 同步内核副本并跑全量测试**
+
+```bash
+python tools\sync-kernel.py
+python tools\sync-kernel.py --check
+python -m unittest discover -s tests -t .
+node --test "miniapps/agaistock/test/*.test.mjs"
+node --check miniapps/agaistock/miniapp/node/server.mjs
+```
+
+Expected: Python 全绿（138 + 新增用例）；Node 49 通过（48 + 1 条 404 不变量）。
+
+> **忘了 `python tools\sync-kernel.py` 的话**，`tests/test_kernel_vendor.py`
+> 的漂移守卫会红 —— 那不是误报，是真的漂了（内核副本里的旧代码会继续被运行）。
+
+- [ ] **Step 11: 在真实安装副本上复验编码崩溃已修**
+
+用 Task 17 的验收办法（`.tmp/` 下起真实服务），并**故意**在 payload 里塞一个
+GBK 编不出来的字符，确认 `list --json` 不再抛 UnicodeEncodeError。
+
+- [ ] **Step 12: Commit**
+
+```bash
+git add src/agaistock miniapps/agaistock/src miniapps/agaistock/config tests miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/miniapp/client/index.html miniapps/agaistock/test/api.test.mjs tools/sync-kernel.py
+git commit -m "fix: survive unencodable output, land observation reviews on trading days, harden config and storage" -- src/agaistock miniapps/agaistock/src miniapps/agaistock/config tests miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/miniapp/client/index.html miniapps/agaistock/test/api.test.mjs
+```
+
+> `src/agaistock` 与 `miniapps/agaistock/src` **必须一起提交** ——
+> 它们是同一份代码的两个副本，漂了漂移守卫就会红。
 
 ---
 
