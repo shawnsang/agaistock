@@ -152,6 +152,48 @@
       .empty { color: var(--mcode-text-subtle); font-size: 13px; padding: 18px 0; text-align: center; }
       .hidden { display: none !important; }
 
+      .muted { color: var(--mcode-text-muted); font-size: 12.5px; }
+
+      button.small { padding: 3px 10px; font-size: 12px; border-radius: 7px; }
+
+      details.reviewer {
+        border: 1px solid var(--mcode-border); border-radius: 10px;
+        background: var(--mcode-surface-muted); padding: 8px 12px; margin-bottom: 8px;
+      }
+      details.reviewer > summary { cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 13px; }
+      .reviewer-id { font-weight: 600; }
+      .reviewer-count { color: var(--mcode-text-muted); font-size: 12px; }
+      .badge-failed {
+        font-size: 11px; padding: 1px 7px; border-radius: 999px;
+        color: var(--mcode-danger); border: 1px solid color-mix(in srgb, var(--mcode-danger) 35%, transparent);
+      }
+      .reviewer-failed { border-color: color-mix(in srgb, var(--mcode-danger) 40%, transparent); }
+
+      ul.finding-list { list-style: none; padding: 0; margin: 10px 0 0; }
+      ul.finding-list > li { border-left: 3px solid var(--mcode-border); padding: 6px 0 6px 10px; margin-bottom: 8px; }
+      ul.finding-list > li.sev-critical { border-left-color: var(--mcode-danger); }
+      ul.finding-list > li.sev-high { border-left-color: var(--mcode-warning); }
+      ul.finding-list > li.sev-medium { border-left-color: var(--mcode-accent); }
+      .finding-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 13px; }
+      .finding-claim { font-weight: 600; }
+      .finding-delta { font-variant-numeric: tabular-nums; color: var(--mcode-danger); font-size: 12.5px; }
+      .finding-meta { color: var(--mcode-text-muted); font-size: 11.5px; margin-top: 1px; }
+      .finding-why { font-size: 12.5px; margin-top: 3px; }
+      .finding-fix { font-size: 12.5px; margin-top: 3px; color: var(--mcode-accent); }
+
+      .proposed h4, .caveats h4, .horizon-checks h4 { font-size: 11.5px; color: var(--mcode-text-muted); margin: 10px 0 4px; font-weight: 600; }
+      .proposed ul, .caveats ul, .horizon-checks ul { margin: 0; padding-left: 18px; font-size: 12.5px; }
+      .invalidation { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+      .invalidation button { padding: 2px 9px; font-size: 11.5px; border-radius: 7px; }
+
+      .score-total { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; margin-bottom: 4px; }
+      .score-total.muted { font-size: 13px; font-weight: 500; }
+      table.score-table { margin-top: 10px; font-size: 12.5px; }
+      table.score-table tr.dim-empty td { color: var(--mcode-text-subtle); }
+
+      .horizon-main { display: flex; align-items: baseline; gap: 8px; font-size: 15px; }
+      .check-rationale { margin: 2px 0 6px; }
+
       @media (max-width: 720px) {
         .page { padding: 16px 14px 44px; }
         .card-grid { grid-template-columns: 1fr; }
@@ -185,6 +227,7 @@
               <span class="level-track" aria-hidden="true"><span class="level-fill" id="level-fill"></span></span>
             </span>
             <button id="parse-btn" type="button">解析成观察卡</button>
+            <button id="clear-btn" class="ghost" type="button">清空</button>
           </div>
 
           <p class="status" id="record-status" role="status" aria-live="polite"></p>
@@ -194,6 +237,29 @@
       <section aria-labelledby="h-card" id="card-section" hidden>
         <h2 id="h-card">观察卡</h2>
         <div class="panel" id="card-panel"></div>
+      </section>
+
+      <section aria-labelledby="h-reviews" id="reviews-section" hidden>
+        <h2 id="h-reviews">点评师意见</h2>
+        <div class="panel">
+          <p class="muted">点评里的中枢、支撑压力与证伪位都是<b>后复权</b>口径的价位，与行情软件里的现价不能直接对照。</p>
+          <div id="reviews-list"></div>
+        </div>
+      </section>
+
+      <section aria-labelledby="h-score" id="score-section" hidden>
+        <h2 id="h-score">评分</h2>
+        <div class="panel">
+          <div id="score-body"></div>
+        </div>
+      </section>
+
+      <section aria-labelledby="h-horizon" id="horizon-section" hidden>
+        <h2 id="h-horizon">观察期</h2>
+        <div class="panel">
+          <p class="muted">到期检查项里的价位同样是<b>后复权</b>口径。</p>
+          <div id="horizon-body"></div>
+        </div>
       </section>
 
       <section aria-labelledby="h-log">
@@ -210,6 +276,7 @@
                   <th scope="col">方向</th>
                   <th scope="col">信心</th>
                   <th scope="col">证伪条件</th>
+                  <th scope="col">操作</th>
                 </tr>
               </thead>
               <tbody id="obs-rows"></tbody>
@@ -228,6 +295,7 @@
         var rawText = document.getElementById('raw-text');
         var recordBtn = document.getElementById('record-btn');
         var parseBtn = document.getElementById('parse-btn');
+        var clearBtn = document.getElementById('clear-btn');
         var recIndicator = document.getElementById('rec-indicator');
         var recTime = document.getElementById('rec-time');
         var levelFill = document.getElementById('level-fill');
@@ -491,29 +559,45 @@
 
           var saveBtn = document.getElementById('save-btn');
           if (saveBtn) {
-            saveBtn.addEventListener('click', function () {
+            saveBtn.addEventListener('click', async function () {
               saveBtn.disabled = true;
-              fetch('/api/save', {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ draft: currentDraft, rawText: rawText.value }),
-              })
-                .then(function (r) { return r.json(); })
-                .then(function (data) {
-                  if (data.ok) {
-                    setStatus(recordStatus, '已保存，共 ' + data.total + ' 条。', 'ok');
-                    runtimeState.count = data.total;
-                    renderChip();
-                    loadObservations();
-                  } else {
-                    setStatus(recordStatus, data.message || '保存失败。', 'error');
-                    saveBtn.disabled = false;
-                  }
-                })
-                .catch(function () {
-                  setStatus(recordStatus, '保存失败。', 'error');
-                  saveBtn.disabled = false;
+              // 保存并点评（草稿变量是 currentDraft）
+              var payload = {
+                symbol: (currentDraft && currentDraft.symbol) || '',
+                name: (currentDraft && currentDraft.name) || '',
+                text: rawText.value
+              };
+              setStatus(recordStatus, '正在保存并点评，可能要等一会儿…', 'warn');
+              try {
+                var resp = await fetch('/api/review', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify(payload)
                 });
+                var data = await resp.json();
+                if (!resp.ok || data.ok === false) {
+                  setStatus(recordStatus, '点评失败：' + (data.message || data.error || resp.status), 'error');
+                  saveBtn.disabled = false;
+                  return;
+                }
+                var r = window.agaistockRender;
+                if (!r) {
+                  setStatus(recordStatus, '前端渲染模块未加载。', 'error');
+                  saveBtn.disabled = false;
+                  return;
+                }
+                document.getElementById('reviews-list').innerHTML = r.renderReviews(data.reviews || []);
+                document.getElementById('score-body').innerHTML = r.renderScore(data.score);
+                document.getElementById('horizon-body').innerHTML = r.renderHorizon(data.horizon);
+                document.getElementById('reviews-section').hidden = false;
+                document.getElementById('score-section').hidden = false;
+                document.getElementById('horizon-section').hidden = false;
+                setStatus(recordStatus, '已保存并完成点评，观察 ' + (data.observation_id || '') + '。', 'ok');
+                loadObservations();
+              } catch (e) {
+                setStatus(recordStatus, '点评失败。', 'error');
+                saveBtn.disabled = false;
+              }
             });
           }
         }
@@ -563,28 +647,61 @@
               }
               obsEmpty.classList.add('hidden');
               obsTableWrap.classList.remove('hidden');
-              obsRows.innerHTML = items.map(function (item) {
-                var d = item.draft || {};
-                var dir = 'dir-' + (d.direction || 'neutral');
-                var hasInvalidation = (d.invalidation || []).length > 0;
-                var when = new Date(item.createdAt);
-                return '<tr>'
-                  + '<td class="num">' + escapeHtml(when.toLocaleString('zh-CN', { hour12: false })) + '</td>'
-                  + '<td class="num">' + escapeHtml((d.symbol || '—') + (d.name ? ' ' + d.name : '')) + '</td>'
-                  + '<td>' + escapeHtml(d.thesis || '（未提取）') + '</td>'
-                  + '<td><span class="tag ' + dir + '">' + escapeHtml(DIRECTION_LABEL[d.direction] || d.direction) + '</span></td>'
-                  + '<td class="num">' + Math.round((d.confidence || 0) * 100) + '%</td>'
-                  + '<td>' + (hasInvalidation
-                      ? escapeHtml((d.invalidation || []).join('；'))
-                      : '<span style="color:var(--mcode-warning)">缺失</span>') + '</td>'
-                  + '</tr>';
-              }).join('');
+              // Task 14 之后 /api/observations 返回的是内核行（不是旧的 {createdAt, draft}）。
+              var render = window.agaistockRender;
+              if (!render) {
+                obsEmpty.classList.remove('hidden');
+                obsTableWrap.classList.add('hidden');
+                setStatus(recordStatus, '前端渲染模块未加载，观察库表格无法显示。', 'error');
+                return;
+              }
+              obsRows.innerHTML = render.renderObservationRows(items);
             })
             .catch(function () { /* leave the empty state as is */ });
         }
 
+        /* ---------- delete observation ---------- */
+        // 行是重绘的，监听器只能挂在 tbody 上做事件委托。
+        obsRows.addEventListener('click', function (event) {
+          var button = event.target && event.target.closest
+            ? event.target.closest('[data-delete-observation]')
+            : null;
+          if (!button) return;
+          var id = button.getAttribute('data-delete-observation');
+          if (!id) return;
+          if (!confirm('删除后该观察不再参与评分与校准统计，确定吗？')) return;
+          fetch('/api/observations/' + encodeURIComponent(id), { method: 'DELETE' })
+            .then(function (res) {
+              if (res.ok) {
+                loadObservations();
+              } else {
+                setStatus(recordStatus, '删除失败。', 'error');
+              }
+            })
+            .catch(function () { setStatus(recordStatus, '删除失败。', 'error'); });
+        });
+
+        /* ---------- clear ---------- */
+        function clearDraft() {
+          rawText.value = '';
+          currentDraft = null;
+          cardPanel.innerHTML = '';
+          document.getElementById('reviews-section').hidden = true;
+          document.getElementById('score-section').hidden = true;
+          document.getElementById('horizon-section').hidden = true;
+          try { localStorage.removeItem('agaistock.draft'); } catch (e) { /* 忽略 */ }
+        }
+        clearBtn.addEventListener('click', clearDraft);
+
         refreshStatus();
-        loadObservations();
+        // render.mjs 是 type="module"（deferred）：它在 DOM 解析完成后、DOMContentLoaded 之前执行。
+        // 本 <script> 是普通脚本（解析期同步执行），所以首次拉观察库必须等 DOMContentLoaded，
+        // 那时 window.agaistockRender 一定已经挂好。
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', function () { loadObservations(); });
+        } else {
+          loadObservations();
+        }
         document.addEventListener('visibilitychange', function () {
           if (document.visibilityState === 'hidden') {
             try { window.localStorage.setItem('agaistock.draft', rawText.value); } catch (e) {}
@@ -596,5 +713,6 @@
         } catch (e) {}
       })();
     </script>
+    <script type="module" src="./render.mjs"></script>
   </body>
 </html>
