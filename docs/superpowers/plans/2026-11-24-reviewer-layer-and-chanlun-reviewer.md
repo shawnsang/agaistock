@@ -7563,6 +7563,461 @@ git commit -m "fix: survive unencodable output, land observation reviews on trad
 
 ---
 
+### Task 19: 结构化观察落库 —— 接住接入层的解析结果，别再丢掉
+
+> **来源**：最终评审 TRIAGE-14（Task 16 实测 + 设计文档 §7 界面样例比对）。
+
+**问题：用户看得到富观察卡，存下来却什么都没了。**
+
+Task 16 实测（安装副本里走完整条链路）：
+
+| 阶段 | 用户看到的东西 |
+|---|---|
+| 「解析成观察卡」 | 标的 002378 章源钨业 · 主张 · **看多 75%** · 依据 5 条（事实 2 · 假设 3） · **证伪条件：钨价跌回去年年底的水平** |
+| 「存进观察库」之后 | 观察库那一行：信心 **0%** · 证伪条件 **缺失** |
+
+原因在链路上：前端「存进观察库」只发 `{symbol, name, text}`，
+**LLM 解析出来的结构化草稿被整个丢掉**；内核 `cli._parse_observation` 用关键词启发式
+重新解析一遍 —— 方向靠「看多/看空/拿/涨」猜、时限靠「半年/一年」猜、
+`confidence` **写死 0.0**，`evidence` 和 `invalidation` 根本没有落库的地方
+（`observations` 表没有这两列）。
+
+设计文档 §7 的界面样例明确要求「看多 72%」「依据 4 条（事实 2 · 假设 2）」
+「⚠ 缺少证伪条件」—— 现在一条都对不上。而且「认知档案 / 校准统计」依赖用户
+自报的信心与判断标准，信心恒为 0 就等于这个能力永远做不了。
+
+**本任务把「结构化记录」这半条链补上**：接入层解析出的观察进内核、落库、显示出来。
+
+**Files:**
+- Modify: `src/agaistock/storage/db.py`（表结构 + 迁移 + 读写）
+- Modify: `src/agaistock/cli.py`（接受结构化观察）
+- Modify: `miniapps/agaistock/miniapp/node/server.mjs`（把草稿传给内核）
+- Modify: `miniapps/agaistock/miniapp/client/index.html`（把草稿发出去）
+- Modify: `miniapps/agaistock/miniapp/client/render.mjs`（展示依据条数；采纳按钮改禁用）
+- Modify: `tests/test_storage.py`、`tests/test_cli.py`
+- Modify: `miniapps/agaistock/test/api.test.mjs`、`miniapps/agaistock/test/render.test.mjs`
+- Modify: `docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md`（采纳路径的后续约定）
+
+> **内核副本同步**：改完 `src/agaistock/**` 必须跑 `python tools/sync-kernel.py`，
+> 否则 `tests/test_kernel_vendor.py` 的漂移守卫会红。
+
+- [ ] **Step 1: `observations` 表加两列 + 补列迁移**
+
+`src/agaistock/storage/db.py` 的 `SCHEMA` 里，`observations` 的定义加两列
+（放在 `position_json` 之后、`raw_text` 之前）：
+
+```sql
+    position_json     TEXT,
+    evidence_json     TEXT,
+    invalidation_json TEXT,
+    raw_text          TEXT,
+```
+
+> **光改 CREATE TABLE 不够**：`CREATE TABLE IF NOT EXISTS` 不会给**已存在**的表加列。
+> 开发机上已经建好的 `data/agaistock.db`、用户装过的旧版本，都是老结构 ——
+> 必须有一条 ALTER 迁移。
+
+在 `migrate()` 里补列迁移：
+
+```python
+# 新增列用 ALTER TABLE 补齐：CREATE TABLE IF NOT EXISTS 不会给已存在的表加列。
+_MIGRATIONS = (
+    ("observations", "evidence_json", "TEXT"),
+    ("observations", "invalidation_json", "TEXT"),
+)
+
+
+def _migrate_columns(conn: sqlite3.Connection) -> None:
+    """给已存在的表补上新增的列（幂等）。"""
+    for table, column, declaration in _MIGRATIONS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+```
+
+`migrate()` 改成：
+
+```python
+def migrate(conn: sqlite3.Connection) -> None:
+    conn.executescript(SCHEMA)
+    _migrate_columns(conn)
+    conn.commit()
+```
+
+- [ ] **Step 2: `insert_observation` 存这两列，`list_observations` 读回来**
+
+`insert_observation` 的 INSERT 列表与参数里加两列，值分别是
+`json.dumps(observation.get("evidence") or [], ensure_ascii=False)` 和
+`json.dumps(observation.get("invalidation") or [], ensure_ascii=False)`。
+
+`list_observations` 改成把 JSON 列解析成数组再返回（前端 `renderObservationRows`
+读的就是 `item.invalidation` 这个**数组**）：
+
+```python
+def _load_json_list(raw: str | None) -> list:
+    """把 JSON 列读成列表；坏数据当成空列表，不能让整张表读不出来。"""
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def list_observations(conn: sqlite3.Connection, include_deleted: bool = False) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM observations"
+    if not include_deleted:
+        sql += " WHERE deleted_at IS NULL"
+    sql += " ORDER BY created_at DESC, rowid DESC"
+    rows = []
+    for row in conn.execute(sql):
+        item = dict(row)
+        item["evidence"] = _load_json_list(item.pop("evidence_json", None))
+        item["invalidation"] = _load_json_list(item.pop("invalidation_json", None))
+        rows.append(item)
+    return rows
+```
+
+> `item.pop("evidence_json")` 把原始 JSON 字符串换掉：对外只暴露解析好的数组，
+> 免得前端拿到字符串还要自己 parse 一遍。
+
+- [ ] **Step 3: 内核接受结构化观察（但不盲信草稿）**
+
+`src/agaistock/cli.py`：
+
+**3.1** `review` 子命令加参数：
+
+```python
+    review.add_argument("--observation-file", default=None,
+                        help="接入层解析出的结构化观察（JSON 文件）")
+```
+
+**3.2** 新增两个函数（放在 `_parse_observation` 后面）：
+
+```python
+def _observation_from_draft(draft: dict, symbol: str, name: str, text: str) -> dict:
+    """把接入层（Mini App 的 LLM 层）解析出的结构化观察转成内核的观察行。
+
+    **不盲信草稿**：每个字段都校验，不合法的退回关键词解析的结果。
+    理由：草稿来自模型输出，可能缺字段、类型不对、信心越界；
+    而观察记录是后面评分与校准的输入，不能带脏数据进去。
+    """
+    fallback = _parse_observation(symbol, name, text)
+    direction = draft.get("direction")
+    if direction not in ("bullish", "bearish", "neutral"):
+        direction = fallback["direction"]
+    raw_confidence = draft.get("confidence")
+    confidence = (
+        float(raw_confidence)
+        if isinstance(raw_confidence, (int, float)) and not isinstance(raw_confidence, bool)
+        else fallback["confidence"]
+    )
+    confidence = min(1.0, max(0.0, confidence))
+    thesis = str(draft.get("thesis") or "").strip() or fallback["thesis"]
+    evidence = []
+    for item in draft.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        item_text = str(item.get("text") or "").strip()
+        if not item_text:
+            continue
+        item_type = item.get("type")
+        evidence.append({
+            "text": item_text,
+            "type": item_type if item_type in ("fact", "assumption") else "assumption",
+        })
+    invalidation = [
+        str(item).strip()
+        for item in (draft.get("invalidation") or [])
+        if str(item or "").strip()
+    ]
+    position = draft.get("position")
+    return {
+        "symbol": symbol or fallback["symbol"],
+        "name": name or str(draft.get("name") or "").strip() or fallback["name"],
+        "direction": direction,
+        "thesis": thesis[:200],
+        "confidence": confidence,
+        "timeframe": str(draft.get("timeframe") or "").strip() or fallback["timeframe"],
+        "trigger": str(draft.get("trigger") or "").strip() or fallback["trigger"],
+        "position": position if isinstance(position, dict) else {},
+        "evidence": evidence,
+        "invalidation": invalidation,
+        "raw_text": text,
+    }
+
+
+def _load_structured_observation(path: str | None, symbol: str, name: str, text: str) -> dict:
+    """有结构化观察文件就用它，没有就退回关键词解析。"""
+    if not path:
+        return _parse_observation(symbol, name, text)
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise FileNotFoundError(f"结构化观察文件不存在: {file_path}")
+    draft = json.loads(file_path.read_text(encoding="utf-8"))
+    if not isinstance(draft, dict):
+        raise ValueError(f"结构化观察文件顶层必须是 JSON 对象: {file_path}")
+    return _observation_from_draft(draft, symbol, name, text)
+```
+
+**3.3** `cmd_review` 里把
+
+```python
+        observation = _parse_observation(args.symbol, args.name, args.text)
+```
+
+改成
+
+```python
+        observation = _load_structured_observation(
+            args.observation_file, args.symbol, args.name, args.text
+        )
+```
+
+- [ ] **Step 4: Mini App 把草稿传给内核**
+
+**4.1** `miniapps/agaistock/miniapp/node/server.mjs`：
+
+- `handleRoute` 的 options 解构加 `dataDir = ''`；
+- 在解构之后算出草稿目录：`const draftDir = dataDir || dirname(dbPath);`（`dirname` 从 `node:path` 导入）；
+- `/api/review` 分支里，把草稿写成临时文件再传给内核：
+
+```javascript
+  if (request.method === 'POST' && url.pathname === '/api/review') {
+    const body = await readBody(request);
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+    if (!text) {
+      sendJson(response, 400, { ok: false, error: 'EMPTY_INPUT', message: '先说点什么。' });
+      return;
+    }
+    // 结构化观察（接入层 LLM 解析出来的草稿）写文件传给内核：
+    // 命令行长度有上限（Windows 约 32K），口述原文可能很长，不能拼在 argv 里。
+    const draft = body.observation && typeof body.observation === 'object' ? body.observation : null;
+    let draftPath = '';
+    if (draft) {
+      draftPath = join(
+        draftDir,
+        `observation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.json`,
+      );
+      await writeFile(draftPath, JSON.stringify(draft), 'utf8');
+    }
+    try {
+      const args = [
+        'review',
+        '--symbol', String(body.symbol ?? ''),
+        '--name', String(body.name ?? ''),
+        '--text', text,
+        '--db', dbPath,
+        '--json',
+      ];
+      if (draftPath) args.push('--observation-file', draftPath);
+      const result = await kernel(args);
+      if (result.code !== 0) {
+        sendJson(response, 422, {
+          ok: false,
+          error: 'KERNEL_FAILED',
+          message: (result.stderr || '').slice(-500) || `exit=${result.code}`,
+        });
+        return;
+      }
+      const payload = parseKernelJson(result.stdout);
+      if (!payload) {
+        sendJson(response, 422, { ok: false, error: 'KERNEL_BAD_OUTPUT', message: result.stdout.slice(-300) });
+        return;
+      }
+      sendJson(response, 200, payload);
+      return;
+    } finally {
+      // 草稿是临时文件：内核跑完就删，不留在宿主数据目录里。
+      if (draftPath) {
+        await rm(draftPath, { force: true }).catch(() => undefined);
+      }
+    }
+  }
+```
+
+- `node:fs/promises` 的 import 里补 `rm`；`node:path` 的 import 里补 `dirname`；
+- `start()` 里给 `handleRoute` 传 `dataDir`。
+
+**4.2** `miniapps/agaistock/miniapp/client/index.html` 的保存按钮：
+
+```javascript
+              var payload = {
+                symbol: (currentDraft && currentDraft.symbol) || '',
+                name: (currentDraft && currentDraft.name) || '',
+                text: rawText.value,
+                // 把接入层解析出的结构化观察一起送过去 —— 内核要靠它落库用户的
+                // 依据、证伪条件和信心，否则这些信息在这里就丢了。
+                observation: currentDraft || null
+              };
+```
+
+- [ ] **Step 5: 观察库展示真实值**
+
+**5.1** `miniapps/agaistock/miniapp/client/render.mjs` 的 `renderObservationRows`：
+读 `item.evidence`，在主张单元格里加一行「依据 N 条」：
+
+```javascript
+    const evidence = Array.isArray(item.evidence) ? item.evidence : [];
+    const invalidation = Array.isArray(item.invalidation) ? item.invalidation : [];
+```
+
+主张单元格改成：
+
+```javascript
+      + '<td>' + escapeHtml(item.thesis || '（未提取）')
+      + (evidence.length ? '<div class="sub">依据 ' + evidence.length + ' 条</div>' : '')
+      + '</td>'
+```
+
+> 信心与证伪条件两列**不用改** —— 它们读的就是 `item.confidence` 和
+> `item.invalidation`，之前之所以恒为 0%/缺失，是内核没存这两样东西（Step 1–3 修掉了）。
+
+**5.2** 「采纳」按钮改成**禁用**并说明原因：
+
+```javascript
+      + '<button type="button" disabled title="采纳需要观察版本链，本轮未实现">采纳</button>'
+```
+
+> **为什么先禁用**：设计文档 §6.3 要求「采纳」写入 `observation.invalidation`
+> 且是**新版本行 + supersedes_id**（观察记录只追加不修改）。当前存储模型没有
+> 观察版本链，直接改数组会破坏「观察记录只追加不修改」这条不变量。
+> 一个点了没反应的按钮比一个明确禁用的按钮更糟 —— 禁用 + 说明 + 写进设计文档的
+> 后续约定，三件事一起做。
+
+- [ ] **Step 6: 补测试**
+
+**6.1 `tests/test_storage.py`**：
+
+```python
+    def test_insert_observation_stores_evidence_and_invalidation(self):
+        conn = make_conn()
+        db.insert_observation(conn, {
+            "symbol": "002378", "name": "章源钨业", "direction": "bullish",
+            "thesis": "钨价上涨", "confidence": 0.75,
+            "evidence": [{"text": "钨价从去年就开始涨", "type": "fact"}],
+            "invalidation": ["钨价跌回去年年底的水平"],
+        })
+        row = db.list_observations(conn)[0]
+        self.assertEqual(row["confidence"], 0.75)
+        self.assertEqual(row["invalidation"], ["钨价跌回去年年底的水平"])
+        self.assertEqual(row["evidence"][0]["type"], "fact")
+
+    def test_migration_adds_columns_to_existing_table(self):
+        # 老库没有这两列：migrate() 必须补上。
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE observations (id TEXT PRIMARY KEY, symbol TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, deleted_at TEXT)"
+        )
+        conn.commit()
+        db.migrate(conn)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(observations)")}
+        self.assertIn("evidence_json", columns)
+        self.assertIn("invalidation_json", columns)
+```
+
+**6.2 `tests/test_cli.py`**：
+
+```python
+    def test_review_accepts_structured_observation(self):
+        # 接入层的结构化草稿要能落库：信心/依据/证伪条件不能丢。
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            draft_path = Path(tmp) / "draft.json"
+            draft_path.write_text(json.dumps({
+                "symbol": "002378", "name": "章源钨业",
+                "thesis": "钨价上涨叠加产量翻倍",
+                "direction": "bullish", "confidence": 0.75,
+                "evidence": [{"text": "钨价从去年就开始涨", "type": "fact"}],
+                "invalidation": ["钨价跌回去年年底的水平"],
+                "timeframe": "半年", "trigger": "明年上半年产量翻倍",
+            }, ensure_ascii=False), encoding="utf-8")
+            code = cli.main([
+                "review", "--symbol", "002378", "--name", "章源钨业",
+                "--text", "还能拿半年", "--observation-file", str(draft_path),
+                "--db", str(db_path), "--json",
+            ])
+            self.assertEqual(code, 0)
+            rows = db.list_observations(db.connect(db_path))
+            self.assertEqual(rows[0]["confidence"], 0.75)
+            self.assertEqual(rows[0]["invalidation"], ["钨价跌回去年年底的水平"])
+            self.assertEqual(rows[0]["thesis"], "钨价上涨叠加产量翻倍")
+
+    def test_structured_observation_clamps_confidence(self):
+        # 草稿里的信心越界要被夹住，不能直接进库。
+        ...
+```
+
+（`tests/test_cli.py` 需要 `from agaistock.storage import db`；`review` 命令会真的
+跑一遍点评师 —— 测试里要像现有用例那样把点评师换掉或用 `--db` 指向临时库，
+具体做法照抄本文件里已有的 `review` 用例。）
+
+**6.3 `miniapps/agaistock/test/api.test.mjs`**：
+
+```javascript
+test('POST /api/review forwards the structured observation to the kernel', async () => {
+  const response = new FakeResponse();
+  const kernel = fakeKernel({ observation_id: 'obs_9', reviews: [], score: {}, horizon: {} });
+  await handleRoute(
+    makeRequest('POST', '/api/review', {
+      symbol: '002378', name: '章源钨业', text: '还能拿半年',
+      observation: { confidence: 0.75, invalidation: ['钨价跌回去年年底的水平'] },
+    }),
+    response,
+    { kernel, dbPath: 'test.db', dataDir: '' },
+  );
+  assert.equal(response.statusCode, 200);
+  const args = kernel.calls[0];
+  assert.ok(args.includes('--observation-file'), '必须把结构化观察传给内核');
+});
+```
+
+**6.4 `miniapps/agaistock/test/render.test.mjs`**：
+
+```javascript
+test('renderObservationRows shows the real confidence and invalidation', () => {
+  const html = renderObservationRows([{
+    id: 'obs_1', created_at: '2026-11-24T07:00:00Z', symbol: '002378', name: '章源钨业',
+    direction: 'bullish', thesis: '钨价上涨', confidence: 0.75,
+    evidence: [{ text: '钨价从去年就开始涨', type: 'fact' }],
+    invalidation: ['钨价跌回去年年底的水平'],
+  }]);
+  assert.match(html, /75%/);
+  assert.match(html, /钨价跌回去年年底的水平/);
+  assert.match(html, /依据 1 条/);
+});
+```
+
+- [ ] **Step 7: 同步内核副本、跑全量测试**
+
+```bash
+python tools\sync-kernel.py
+python tools\sync-kernel.py --check
+python -m unittest discover -s tests -t .
+node --test "miniapps/agaistock/test/*.test.mjs"
+```
+
+- [ ] **Step 8: 写回设计文档（采纳路径的后续约定）**
+
+在设计文档 §6.3「证伪条件的采纳路径」下面补一段：
+
+> **当前实现（2026-11-24）**：「采纳」按钮暂时**禁用**。观察记录目前没有版本链
+> （`supersedes_id`），而采纳会修改已存在的观察记录 —— 与「观察记录只追加不修改」
+> 的不变量冲突。下一轮补观察版本链时再启用。点评师的 `proposed_invalidation`
+> 依然**不会自动写入** observation（§2.2 硬约束），这一点不变。
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/agaistock miniapps/agaistock/src miniapps/agaistock/config tests miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/miniapp/client/index.html miniapps/agaistock/miniapp/client/render.mjs miniapps/agaistock/test/api.test.mjs miniapps/agaistock/test/render.test.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
+git commit -m "feat: persist the structured observation from the parsing layer" -- src/agaistock miniapps/agaistock/src miniapps/agaistock/config tests miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/miniapp/client/index.html miniapps/agaistock/miniapp/client/render.mjs miniapps/agaistock/test/api.test.mjs miniapps/agaistock/test/render.test.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
+```
+
+---
+
 ## Appendix A: 常用命令速查
 
 ```bash
