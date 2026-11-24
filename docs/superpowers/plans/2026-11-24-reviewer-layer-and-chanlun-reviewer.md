@@ -7591,15 +7591,62 @@ Task 16 实测（安装副本里走完整条链路）：
 **Files:**
 - Modify: `src/agaistock/storage/db.py`（表结构 + 迁移 + 读写）
 - Modify: `src/agaistock/cli.py`（接受结构化观察）
+- Modify: `src/agaistock/reviewers/engine.py`（Task 18 引入的回归：空版本号）
 - Modify: `miniapps/agaistock/miniapp/node/server.mjs`（把草稿传给内核）
 - Modify: `miniapps/agaistock/miniapp/client/index.html`（把草稿发出去）
 - Modify: `miniapps/agaistock/miniapp/client/render.mjs`（展示依据条数；采纳按钮改禁用）
-- Modify: `tests/test_storage.py`、`tests/test_cli.py`
+- Modify: `tests/test_storage.py`、`tests/test_cli.py`、`tests/test_engine.py`
 - Modify: `miniapps/agaistock/test/api.test.mjs`、`miniapps/agaistock/test/render.test.mjs`
 - Modify: `docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md`（采纳路径的后续约定）
 
 > **内核副本同步**：改完 `src/agaistock/**` 必须跑 `python tools/sync-kernel.py`，
 > 否则 `tests/test_kernel_vendor.py` 的漂移守卫会红。
+
+- [ ] **Step 0: 先修 Task 18 引入的一处回归：空版本号的点评师会让整轮崩掉**
+
+`src/agaistock/reviewers/engine.py` 里三处 `getattr(reviewer, "version", "0.0.0")`
+只在属性**不存在**时用占位版本；属性存在但为空串时拿到的是 `""`。
+Task 18 之后 `db.insert_review` 把 `reviewer_version` 变成必填（空值抛 ValueError），
+而落库在异常隔离**之外** —— 于是「一个点评师定义的版本号是空的」会从
+「这一条点评是 error」升级成「整轮点评崩掉」。
+
+加一个统一的取值函数（放在 `_error_verdict` 前面）：
+
+```python
+def _reviewer_version(reviewer) -> str:
+    """点评师版本号；空值用占位版本。
+
+    空版本号会被 db.insert_review 拒绝落库（reviewer_version 是必填），
+    而落库在异常隔离之外 —— 不能让「一个点评师定义有问题」变成「整轮崩掉」。
+    """
+    version = getattr(reviewer, "version", "")
+    return str(version).strip() or "0.0.0"
+```
+
+把 engine.py 里那三处 `getattr(reviewer, "version", "0.0.0")` 全换成
+`_reviewer_version(reviewer)`。
+
+测试（`tests/test_engine.py`，沿用本文件里 `contract.ReviewContext(...)` 的写法）：
+
+```python
+    def test_error_verdict_with_empty_reviewer_version_is_still_persistable(self):
+        # 版本号为空串的点评师：结论落库时 reviewer_version 是必填，
+        # 不能让「定义有问题」升级成「整轮崩」。
+        class EmptyVersionReviewer:
+            id = "empty-version"
+            version = ""
+
+            def review(self, ctx):
+                raise RuntimeError("炸了")
+
+        ctx = contract.ReviewContext(
+            observation={}, symbol="002378", name="章源钨业", now="t",
+            data_dir=".", llm=None,
+        )
+        verdict = engine.run_one(EmptyVersionReviewer(), ctx)
+        self.assertEqual(verdict.status, "error")
+        self.assertTrue(verdict.reviewer_version, "版本号不能是空串")
+```
 
 - [ ] **Step 1: `observations` 表加两列 + 补列迁移**
 
