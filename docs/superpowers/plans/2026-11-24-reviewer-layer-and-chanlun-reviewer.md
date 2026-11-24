@@ -4987,7 +4987,6 @@ def _open(db_arg: str | None):
 
 def _parse_observation(symbol: str, name: str, text: str) -> dict:
     """极简解析：方向与时限靠关键词；真实解析由 Mini App 的 LLM 层完成。"""
-    lowered = text.lower()
     direction = "neutral"
     if any(word in text for word in ("看多", "看好", "拿", "涨", "买")):
         direction = "bullish"
@@ -5048,7 +5047,7 @@ def cmd_review(args) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(f"观察 {observation_id}：{observation['name']} {observation['symbol']}")
-            print(f"评分 {score['total']:.1f} / 100（被审维度：{'、'.join(score['scored_dimensions']) or '无'}）")
+            print(f"评分 {score['total']:.1f} / 100（被审维度：{'、'.join(score['scored_dimensions']) or '无'}，分母 {score['score_denominator']:.2f}）")
             print(f"观察期 {plan['review_at']}（档位 {plan['tier'] or '默认'}）")
             for verdict in saved:
                 print(f"- {verdict['reviewer_id']} [{verdict['status']}] {len(verdict['findings'])} 条发现")
