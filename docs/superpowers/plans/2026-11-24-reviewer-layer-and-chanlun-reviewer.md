@@ -3927,6 +3927,46 @@ class ReviewerTests(unittest.TestCase):
         self.assertEqual(r.id, "anchor-chanlun")
         self.assertEqual(r.version, "0.1.0")
 
+    def test_fetch_last_close_reads_the_price_from_the_quotes_payload(self):
+        # 实测（2026-11-24）：tdx_quotes 的现价在 **HQInfo** 里，
+        # 顶层根本没有 AttachInfo（那是 K 线载荷 tdx_kline 的元数据）。
+        # 读错字段 → 回退路径永远静默返回「现价未知」。
+        payload = {"HQInfo": {"Now": 15.54, "Close": 15.59}}
+        with mock.patch.object(reviewer.tdx, "fetch_quotes", return_value=payload), \
+             mock.patch.object(
+                 reviewer, "_latest_factor_row",
+                 return_value={"factor": 2.0, "constant": 1.0},
+             ):
+            value = reviewer.fetch_last_close("002378", "0")
+        # 现价 15.54 → 后复权 = 15.54 × 2.0 + 1.0
+        self.assertAlmostEqual(value, 32.08)
+
+    def test_fetch_last_close_prefers_the_structure_last_close(self):
+        # 结构里的 last_close 已在后复权空间，不该再调行情接口。
+        structure = {"levels": {"day": {"last_close": 42.66}}}
+        with mock.patch.object(reviewer.tdx, "fetch_quotes") as quotes:
+            value = reviewer.fetch_last_close("002378", "0", structure)
+        self.assertAlmostEqual(value, 42.66)
+        quotes.assert_not_called()
+
+    def test_fetch_last_close_returns_unknown_without_an_adjustment_factor(self):
+        # 换不到因子行就**不能**返回现价 —— 它不在后复权空间，
+        # 拿它去和后复权的中枢上下沿比会得出错误结论。
+        payload = {"HQInfo": {"Now": 15.54}}
+        with mock.patch.object(reviewer.tdx, "fetch_quotes", return_value=payload), \
+             mock.patch.object(reviewer, "_latest_factor_row", return_value=None):
+            self.assertEqual(reviewer.fetch_last_close("002378", "0"), 0.0)
+
+    def test_fetch_last_close_survives_an_unexpected_payload_shape(self):
+        # 行情载荷的形态不该由我们假设：容器不是 dict 时不能抛 AttributeError。
+        for payload in ({}, {"HQInfo": None}, {"AttachInfo": []}, {"HQInfo": {"Now": "x"}}):
+            with mock.patch.object(reviewer.tdx, "fetch_quotes", return_value=payload), \
+                 mock.patch.object(
+                     reviewer, "_latest_factor_row",
+                     return_value={"factor": 1.0, "constant": 0.0},
+                 ):
+                self.assertEqual(reviewer.fetch_last_close("002378", "0"), 0.0)
+
     def test_review_returns_valid_verdict(self):
         structure = make_structure()
         with TemporaryDirectory() as tmp:
@@ -3999,7 +4039,6 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from ...providers import tdx
 from ...reviewers.contract import ReviewContext, ReviewVerdict, validate_verdict
@@ -4037,6 +4076,27 @@ def _latest_factor_row(symbol: str) -> dict | None:
     return factors[0] if factors else None
 
 
+def _quote_price(payload: dict) -> float:
+    """从行情载荷里取现价（**不复权**口径）。
+
+    实测（2026-11-24，`tdx_quotes` 返回 002378）：
+      - 顶层键是 BaseInfo / ExtInfo / **HQInfo** / CalcInfo / ProInfo / ...
+      - `HQInfo.Now` = 15.54（现价）、`HQInfo.Close` = 15.59（收盘价）
+      - **没有 `AttachInfo`** —— 那是 K 线载荷 `tdx_kline` 的元数据，不是行情载荷的。
+        读错字段会让回退路径永远静默返回「现价未知」。
+    两个容器都试一遍，兼容两种载荷形态。
+    """
+    for container in ("HQInfo", "AttachInfo"):
+        info = payload.get(container)
+        if not isinstance(info, dict):
+            continue
+        for key in ("Now", "Close"):
+            value = info.get(key)
+            if isinstance(value, (int, float)) and value:
+                return float(value)
+    return 0.0
+
+
 def fetch_last_close(symbol: str, setcode: str, structure: dict | None = None) -> float:
     """取现价（**后复权空间**）。
 
@@ -4057,16 +4117,13 @@ def fetch_last_close(symbol: str, setcode: str, structure: dict | None = None) -
         payload = tdx.fetch_quotes(symbol, setcode)
     except Exception:  # noqa: BLE001
         return 0.0
-    info = (payload.get("AttachInfo") or {})
-    for key in ("Now", "Close"):
-        value = info.get(key)
-        if isinstance(value, (int, float)) and value:
-            price = float(value)
-            row = _latest_factor_row(symbol)
-            # 换不到因子行就**不能**返回现价 —— 它不在后复权空间，
-            # 拿它去和后复权的中枢上下沿比会得出错误结论。返回 0.0 表示「未知」。
-            return 0.0 if row is None else tdx.to_houfuquan(price, row)
-    return 0.0
+    price = _quote_price(payload)
+    if not price:
+        return 0.0
+    row = _latest_factor_row(symbol)
+    # 换不到因子行就**不能**返回现价 —— 它不在后复权空间，
+    # 拿它去和后复权的中枢上下沿比会得出错误结论。返回 0.0 表示「未知」。
+    return 0.0 if row is None else tdx.to_houfuquan(price, row)
 
 
 class Reviewer:
@@ -4168,7 +4225,7 @@ class Reviewer:
 python -m unittest tests.test_anchor_chanlun_reviewer -v
 ```
 
-Expected: 4 tests PASS
+Expected: 8 tests PASS
 
 - [ ] **Step 5: Commit**
 
