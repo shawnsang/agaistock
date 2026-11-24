@@ -1540,8 +1540,11 @@ class McodeCliTests(unittest.TestCase):
     @mock.patch("agaistock.providers.mcode_cli.subprocess.run")
     def test_call_connector_raises_on_non_zero_exit(self, fake_run):
         fake_run.return_value = mock.Mock(returncode=1, stdout="", stderr="boom")
-        with self.assertRaises(RuntimeError):
+        # MCodedToolsMissing 是 RuntimeError 的子类，所以只断言 RuntimeError 分不出两类错误；
+        # 必须显式断言「不是缺 CLI」。
+        with self.assertRaises(RuntimeError) as ctx:
             mcode_cli.call_connector("some__tool", {})
+        self.assertNotIsInstance(ctx.exception, mcode_cli.MCodedToolsMissing)
 
     @mock.patch("agaistock.providers.mcode_cli.subprocess.run")
     def test_call_connector_uses_args_file_not_inline_json(self, fake_run):
@@ -2174,6 +2177,12 @@ Expected: 30 分钟级别的 Close **也是后复权**（与日线同量级，�
 git add src/agaistock/providers src/agaistock/storage/db.py tests/test_mcode_cli.py tests/test_tdx.py tests/test_storage.py
 git commit -m "feat: mcode-tools connector bridge, tdx kline provider and adjustment factors"
 ```
+
+> 本 Task 在实际执行中分两轮落地（复权口径在第二轮修正，见 Global Constraint 16）：
+> 第一轮提交连接器桥 + 通达信 provider + 复权因子落库；第二轮把后复权改成
+> **provider 层自建**（`fetch_raw_kline` + `apply_houfuquan` + `factor_row_for`），
+> 并让 `fetch_adjustment_factors` 在找不到因子表时重试后抛错。
+> 第二轮的提交只动 `src/agaistock/providers` 与 `tests/test_tdx.py`。
 
 ---
 
