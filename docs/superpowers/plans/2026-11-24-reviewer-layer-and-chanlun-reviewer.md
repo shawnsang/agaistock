@@ -382,6 +382,50 @@ class StorageTests(unittest.TestCase):
         a_rows = [r for r in latest if r["reviewer_id"] == "a"]
         self.assertEqual(a_rows[0]["ran_at"], "2026-11-24T09:00:00Z")
 
+    def test_latest_reviews_returns_one_row_when_ran_at_ties(self):
+        """同一 reviewer 两条 ran_at 相同的 review，只能返回一条。"""
+        conn = make_conn()
+        obs_id = db.insert_observation(conn, OBSERVATION)
+        db.insert_review(conn, obs_id, verdict(reviewer_id="a", ran_at="2026-11-24T07:00:00Z"))
+        db.insert_review(conn, obs_id, verdict(reviewer_id="a", ran_at="2026-11-24T07:00:00Z"))
+        latest = db.latest_reviews(conn, obs_id)
+        self.assertEqual(len(latest), 1)
+        self.assertEqual(latest[0]["reviewer_id"], "a")
+        self.assertEqual(latest[0]["ran_at"], "2026-11-24T07:00:00Z")
+
+    def test_insert_observation_keeps_position_json_verbatim(self):
+        """position_json 已是序列化字符串，原样落库，不得被静默丢弃。"""
+        conn = make_conn()
+        observation = dict(OBSERVATION, position_json='{"shares": 1000}')
+        obs_id = db.insert_observation(conn, observation)
+        rows = db.list_observations(conn)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], obs_id)
+        self.assertEqual(rows[0]["position_json"], '{"shares": 1000}')
+
+    def test_insert_observation_serializes_position_dict(self):
+        """position 传 dict 时，序列化后落库。"""
+        conn = make_conn()
+        observation = dict(OBSERVATION)
+        observation.pop("position_json")
+        observation["position"] = {"shares": 1000}
+        db.insert_observation(conn, observation)
+        rows = db.list_observations(conn)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["position_json"], '{"shares": 1000}')
+
+    def test_soft_deleted_observation_keeps_its_reviews(self):
+        """软删观察不隐藏其 reviews —— 全局约束：reviews 保留。"""
+        conn = make_conn()
+        obs_id = db.insert_observation(conn, OBSERVATION)
+        db.insert_review(conn, obs_id, verdict())
+        self.assertTrue(db.soft_delete_observation(conn, obs_id))
+        self.assertEqual(db.list_observations(conn), [])
+        self.assertEqual(len(db.list_observations(conn, include_deleted=True)), 1)
+        latest = db.latest_reviews(conn, obs_id)
+        self.assertEqual(len(latest), 1)
+        self.assertEqual(latest[0]["reviewer_id"], "anchor-chanlun")
+
     def test_insert_and_list_adjustment_factors(self):
         conn = make_conn()
         written = db.insert_adjustment_factors(
@@ -608,19 +652,30 @@ def insert_review(conn: sqlite3.Connection, observation_id: str, verdict: dict[s
 
 
 def latest_reviews(conn: sqlite3.Connection, observation_id: str) -> list[dict]:
+    """每位 reviewer 只返回 ran_at 最新的一条，按 ran_at 升序返回。
+
+    ran_at 精度只到秒，同一 reviewer 同一秒内的两次运行会并列；
+    依次用 created_at、rowid（插入顺序）兜底排序，保证每位 reviewer
+    恰好一行，且并列时取后插入的那次运行。
+    """
     rows = conn.execute(
-        """SELECT r.* FROM reviews r
-           JOIN (SELECT reviewer_id, MAX(ran_at) AS mx
-                 FROM reviews WHERE observation_id = ?
-                 GROUP BY reviewer_id) latest
-             ON r.reviewer_id = latest.reviewer_id AND r.ran_at = latest.mx
-           WHERE r.observation_id = ?
-           ORDER BY r.ran_at ASC""",
-        (observation_id, observation_id),
+        """SELECT * FROM (
+               SELECT r.*,
+                      ROW_NUMBER() OVER (
+                          PARTITION BY r.reviewer_id
+                          ORDER BY r.ran_at DESC, r.created_at DESC, r.rowid DESC
+                      ) AS rn
+               FROM reviews r
+               WHERE r.observation_id = ?
+           )
+           WHERE rn = 1
+           ORDER BY ran_at ASC, created_at ASC, id ASC""",
+        (observation_id,),
     )
     result = []
     for row in rows:
         item = dict(row)
+        item.pop("rn", None)
         item["verdict"] = json.loads(item.pop("verdict_json"))
         result.append(item)
     return result
@@ -671,7 +726,7 @@ def list_adjustment_factors(conn: sqlite3.Connection, symbol: str) -> list[dict[
 python -m unittest tests.test_storage -v
 ```
 
-Expected: 9 tests PASS
+Expected: 13 tests PASS
 
 - [ ] **Step 5: Commit**
 
