@@ -8109,6 +8109,268 @@ git add src/agaistock miniapps/agaistock/src miniapps/agaistock/config tests min
 git commit -m "feat: persist the structured observation from the parsing layer" -- src/agaistock miniapps/agaistock/src miniapps/agaistock/config tests miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/miniapp/client/index.html miniapps/agaistock/miniapp/client/render.mjs miniapps/agaistock/test/api.test.mjs miniapps/agaistock/test/render.test.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
 ```
 
+### Task 20: 缠论分析工作目录落 `dataDir` —— 别把运行产物写进安装产物
+
+> **来源**：Task 16 的最终独立评审（verifier）finding F4。评审方核对真实运行库与
+> 安装副本时发现：设计文档 §16.2 第 3 条「运行数据必须落 `context.dataDir`」
+> **过宽** —— 只有**数据库**落 `dataDir`，**缠论分析工作目录仍写在插件包自己的
+> `data/` 下**。
+
+**缺陷（Minor，但属结构性错位）**
+
+`cli.py` 构造 `ReviewContext` 时写死：
+
+```python
+data_dir=config.repo_root() / "data",
+```
+
+`config.repo_root()` 是 `Path(__file__).resolve().parents[2]` —— 在**仓库内**指向仓库根，
+在**安装副本**里指向**包根**（`…\Temp\mavis-miniapp-XXXXXX\package\`）。
+于是 `reviewer.py` 的
+
+```python
+work_dir = Path(ctx.data_dir) / "chanlun" / symbol
+work_dir.mkdir(parents=True, exist_ok=True)
+```
+
+在安装副本里就变成 `…\package\data\chanlun\<symbol>\` —— **运行产物写进了安装产物**。
+
+两条后果：
+
+1. **污染安装产物**：上游脚本产出的 K 线与结构 JSON（实测 9 个文件）落进插件包目录。
+   `data/` 已被 `.gitignore` 忽略，所以这些文件**不随包发布**，但每次运行都会在
+   安装目录里重新生成一批。
+2. **只读安装会直接崩**：`work_dir.mkdir(parents=True, exist_ok=True)` 在只读目录上抛
+   `PermissionError` → 点评师整体失败 → 正是 Task 17 想根除的那类「内核失败被隐藏」。
+
+> **这不是「缓存」**：`build_structure()` 每次都重新拉三级别 K 线、重写 `kline_*.json`、
+> 重跑上游脚本，**从不复用**既有文件。它只是**中间产物暂存区** —— 所以
+> 「缓存跨重装保留」这条收益本来就不存在。要修的是**位置**，不是命中率。
+
+**修法**：与数据库完全对称 —— 数据库走 `AGAISTOCK_DB` 环境变量，工作目录走
+`AGAISTOCK_DATA_DIR` 环境变量，都由 Node 侧从 `context.dataDir` 派生。
+
+**Files:**
+- Modify: `src/agaistock/config.py`（新增 `data_dir()`）
+- Modify: `src/agaistock/cli.py`（`ReviewContext.data_dir` 改用 `config.data_dir()`）
+- Modify: `miniapps/agaistock/miniapp/node/server.mjs`（导出 `buildKernelEnv()`，`runKernel` 与 `start()` 用它）
+- Modify: `tests/test_config.py`（`data_dir()` 的 3 条行为）
+- Modify: `tests/test_cli.py`（`ReviewContext.data_dir` 取自环境变量）
+- Modify: `miniapps/agaistock/test/api.test.mjs`（内核子进程拿得到 `AGAISTOCK_DATA_DIR`）
+- Modify: `miniapps/agaistock/src/agaistock/**`（由 `tools/sync-kernel.py` 生成）
+
+**Interfaces:**
+- Consumes: `context.dataDir`（宿主给的）
+- Produces:
+  - `agaistock.config.data_dir() -> Path` —— `AGAISTOCK_DATA_DIR` 优先，否则 `repo_root()/"data"`
+  - `server.mjs` 新导出 `buildKernelEnv(options) -> object`
+  - `runKernel(args, options)` 的 `options` 新增 `dataDir`
+
+- [ ] **Step 1: 写测试（RED）**
+
+`tests/test_config.py` 追加（该文件已 `import os` / `from unittest import mock`；没有就先补）：
+
+```python
+class DataDirTest(unittest.TestCase):
+    def test_env_var_wins(self):
+        with mock.patch.dict(os.environ, {"AGAISTOCK_DATA_DIR": "/tmp/host-data"}):
+            self.assertEqual(config.data_dir(), Path("/tmp/host-data"))
+
+    def test_falls_back_to_repo_data_dir(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(config.data_dir(), config.repo_root() / "data")
+
+    def test_blank_env_var_is_treated_as_unset(self):
+        with mock.patch.dict(os.environ, {"AGAISTOCK_DATA_DIR": "   "}):
+            self.assertEqual(config.data_dir(), config.repo_root() / "data")
+```
+
+> `mock.patch.dict(os.environ, {}, clear=True)` 会清空整个环境变量 —— 在 Windows 上
+> 可能让 `Path` 解析出问题；更稳的写法是 `clear=False` + 先 `os.environ.pop`。
+> **实现者选一种能稳定通过的方式，但三条行为语义必须一致。**
+
+`tests/test_cli.py` 追加（照抄同文件里已有的
+`test_review_wires_llm_client_into_review_context` 捕获 ctx 的写法）：
+
+```python
+    def test_review_data_dir_comes_from_the_host_env_var(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            captured = {}
+
+            def fake_run_reviewers(ctx, reviewers):
+                captured["ctx"] = ctx
+                return []
+
+            with mock.patch.object(cli, "run_reviewers", side_effect=fake_run_reviewers), \
+                 mock.patch.dict(os.environ, {"AGAISTOCK_DATA_DIR": tmp}):
+                code = cli.main([
+                    "review", "--symbol", "002378", "--name", "章源钨业",
+                    "--text", "还能拿半年", "--db", str(db_path), "--json",
+                ])
+            self.assertEqual(code, 0)
+            self.assertEqual(captured["ctx"].data_dir, Path(tmp))
+```
+
+`miniapps/agaistock/test/api.test.mjs`：把顶部的 server.mjs 导入改成具名导入两个函数，
+再在文件末尾追加两条测试。
+
+```javascript
+// 顶部：原来只 import handleRoute，现在多带一个 buildKernelEnv
+import { handleRoute, buildKernelEnv } from '../miniapp/node/server.mjs';
+```
+
+```javascript
+// 文件末尾追加（该文件已 import assert / test）
+test('the kernel gets the host data dir, not the installed package dir', () => {
+  const env = buildKernelEnv({ dbPath: 'D:\\host\\data\\agaistock.db', dataDir: 'D:\\host\\data' });
+  assert.equal(env.AGAISTOCK_DB, 'D:\\host\\data\\agaistock.db');
+  assert.equal(env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
+});
+
+test('the kernel env never invents a data dir on its own', () => {
+  const env = buildKernelEnv({});
+  assert.equal(env.AGAISTOCK_DATA_DIR, undefined);
+});
+
+test('a blank data dir is not a usable path', () => {
+  const env = buildKernelEnv({ dataDir: '' });
+  assert.equal(env.AGAISTOCK_DATA_DIR, undefined);
+});
+```
+
+- [ ] **Step 2: `config.data_dir()`**
+
+`src/agaistock/config.py` —— 加 `import os`，并在 `repo_root()` 之后加：
+
+```python
+DATA_DIR_ENV = "AGAISTOCK_DATA_DIR"
+
+
+def data_dir() -> Path:
+    """运行期数据目录（数据库之外的可写工作区）。
+
+    宿主（Mini App 的 Node 侧）通过 `AGAISTOCK_DATA_DIR` 指向 `context.dataDir`。
+    插件目录是**安装产物**：可能被宿主重装覆盖，也可能以只读方式安装 ——
+    运行期产物不能写在那里。
+
+    未设置时退回 `repo_root()/"data"`（仓库内直接跑 CLI 的开发场景）。
+    """
+    override = os.environ.get(DATA_DIR_ENV, "").strip()
+    if override:
+        return Path(override)
+    return repo_root() / "data"
+```
+
+- [ ] **Step 3: `cli.py` 改用它**
+
+`src/agaistock/cli.py` 第 152 行：
+
+```python
+            data_dir=config.data_dir(),
+```
+
+- [ ] **Step 4: `server.mjs` 传 `AGAISTOCK_DATA_DIR`**
+
+把 env 的组装抽成可测的纯函数，`runKernel` 与 `start()` 都用它：
+
+```javascript
+/**
+ * 组装内核子进程的环境变量。
+ *
+ * 运行期的两样东西都必须落宿主给的数据目录（`context.dataDir`）：
+ *  - 数据库：AGAISTOCK_DB
+ *  - 缠论分析工作目录：AGAISTOCK_DATA_DIR
+ * 插件目录是**安装产物**（可能被重装覆盖，也可能只读安装），运行产物不能写在那里。
+ */
+export function buildKernelEnv(options = {}) {
+  const env = {
+    ...process.env,
+    PYTHONPATH: options.pythonPath || KERNEL_SRC,
+    PYTHONIOENCODING: 'utf-8',
+  };
+  if (options.dbPath) env.AGAISTOCK_DB = options.dbPath;
+  if (options.dataDir) env.AGAISTOCK_DATA_DIR = options.dataDir;
+  return env;
+}
+```
+
+`runKernel`：把 env 的组装交给 `buildKernelEnv`，并多取一个 `dataDir`。
+
+原来这两行（在 `return new Promise(...)` 之后）：
+
+```javascript
+    const env = { ...process.env, PYTHONPATH: pythonPath, PYTHONIOENCODING: 'utf-8' };
+    if (dbPath) env.AGAISTOCK_DB = dbPath;
+```
+
+**替换成一行**：
+
+```javascript
+    const env = buildKernelEnv({ pythonPath, dbPath, dataDir });
+```
+
+并且在 `const dbPath = options.dbPath || '';` **后面加一行**：
+
+```javascript
+  const dataDir = options.dataDir || '';
+```
+
+`start()` 里把 `dataDir` 传进去：
+
+```javascript
+  const kernel = (args) => runKernel(args, {
+    cwd: pluginRoot,
+    pythonPath: join(pluginRoot, 'src'),
+    dbPath,
+    dataDir,
+  });
+```
+
+- [ ] **Step 5: 同步内核副本、跑全量测试**
+
+```bash
+python tools\sync-kernel.py
+python tools\sync-kernel.py --check
+python -m unittest discover -s tests -t .
+node --test "miniapps/agaistock/test/*.test.mjs"
+```
+
+- [ ] **Step 6: 写回设计文档**
+
+设计文档两处要改：
+
+- **§16.2 第 3 条**：把「**数据库**必须落 `context.dataDir`」改成
+  「**运行期产物（数据库 + 缠论分析工作目录）都落 `context.dataDir`**」，
+  并**删掉**「缓存每次重装要重算」那句（`build_structure` 每次都重算，本来就不复用，
+  这条收益本来就不存在）。同时把那条 ⚠️ 例外说明删掉。
+- **§16.4**：删掉「缠论分析缓存仍写在插件包里」这条（已修），
+  其余条目（观察版本链、`contract.py`、`engine.py`、`persist()`、`mcp/`、上游 resonance）
+  **保持不动**。
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/agaistock miniapps/agaistock/src miniapps/agaistock/config tests miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/test/api.test.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
+git commit -m "fix: keep the chanlun work dir out of the installed package" -- src/agaistock miniapps/agaistock/src miniapps/agaistock/config tests miniapps/agaistock/miniapp/node/server.mjs miniapps/agaistock/test/api.test.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
+```
+
+> **不要用 `git add -A`**（Global Constraint 14）。内核副本目录必须与源一起提交，
+> 否则 `tests/test_kernel_vendor.py` 的漂移守卫会红。
+
+- [ ] **Step 8: 重新发布并实测验证**
+
+```bash
+miniapp { action: "publish", pluginId: "agaistock", sourcePath: "<repo>/miniapps/agaistock" }
+miniapp { action: "open",    pluginId: "agaistock" }
+```
+
+跑一次点评，然后确认：
+- 安装副本的 `package/data/` 下**没有**新生成 `chanlun/` 目录
+- 宿主数据目录 `…\plugin-data\liveboards\agaistock\` 下**有** `chanlun/002378/`
+
+---
+
 ---
 
 ## Appendix A: 常用命令速查
