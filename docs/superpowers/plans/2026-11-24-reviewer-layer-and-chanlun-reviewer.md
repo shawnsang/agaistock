@@ -2868,6 +2868,60 @@ class SignalsTests(unittest.TestCase):
             if item.comparator == "below":
                 self.assertIn("现价未知", item.rationale)
 
+    def test_structural_falsification_findings_land_on_the_falsification_dimension(self):
+        # 设计文档 §5.1 / 主规格 §5.3：anchor-chanlun 要同时贡献「证伪条件」与
+        # 「位置与时机」两个维度。若全部发现都落在位置与时机，证伪条件（权重 25%）
+        # 会恒为 no_reviewer 被剔除，总分实际只除以 15% 的权重。
+        st = structure()
+        st["levels"]["day"]["nearby_pivots"] = [
+            {"from": "2026-02-05", "to": "2026-09-22", "ZD": 22.39, "ZG": 29.04,
+             "role": "recent", "dist_pct": 44.08}
+        ]
+        findings, _ = rules.evaluate(BULLISH, st, 15.54)
+        by_code = {f.code: f for f in findings}
+        # 中枢距现价远 → 结构位证伪条件不可靠 → 归「证伪条件」
+        self.assertEqual(by_code["CHAN_PIVOT_FAR_FROM_PRICE"].dimension, "证伪条件")
+        # 现价在中枢内部 → 说清了失效线在哪 → 也归「证伪条件」
+        st2 = structure()
+        st2["levels"]["day"]["nearby_pivots"] = [
+            {"from": "2025-08-04", "to": "2026-02-05", "ZD": 11.84, "ZG": 14.05,
+             "role": "current", "dist_pct": -9.59}
+        ]
+        findings2, _ = rules.evaluate(BULLISH, st2, 13.0)
+        by_code2 = {f.code: f for f in findings2}
+        self.assertEqual(by_code2["CHAN_PRICE_INSIDE_PIVOT"].dimension, "证伪条件")
+
+    def test_position_findings_stay_on_the_position_dimension(self):
+        # 「位置与时机」维度的贡献不能被上面那条改动挤掉
+        st = structure()
+        st["levels"]["week"]["bias"] = "down"
+        findings, _ = rules.evaluate(BULLISH, st, 15.54)
+        by_code = {f.code: f for f in findings}
+        self.assertEqual(by_code["CHAN_HIGHER_LEVEL_DENIES"].dimension, "位置与时机")
+
+    def test_horizon_hint_is_capped_by_its_own_findings(self):
+        # 同一份结论不能自相矛盾：finding 说「把观察期放在短线档」，
+        # horizon_hint 就不能给 long。
+        st = structure()
+        st["levels"]["week"]["bias"] = "up"
+        st["levels"]["week"]["recent_divergence"] = None
+        st["levels"]["day"]["signal"] = "中枢上方 · 底背驰预警"
+        findings, _ = rules.evaluate(BULLISH, st, 15.54)
+        codes = [f.code for f in findings]
+        self.assertIn("CHAN_SECOND_BUY_NO_BACKING", codes)
+        hint = signals.build_horizon_hint(BULLISH, st, findings, last_close=15.54)
+        self.assertEqual(hint.tier, "short")
+        self.assertIn("降为 short", hint.rationale)
+
+    def test_horizon_hint_keeps_long_tier_when_no_cap_applies(self):
+        # 没有降档约束时，档位逻辑保持原样
+        st = structure()
+        st["levels"]["week"]["bias"] = "up"
+        st["levels"]["week"]["recent_divergence"] = {"active": True, "kind": "bottom"}
+        st["levels"]["day"]["signal"] = "中枢上方 · 底背驰预警"
+        hint = signals.build_horizon_hint(BULLISH, st, [], last_close=15.54)
+        self.assertEqual(hint.tier, "long")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -2931,11 +2985,12 @@ def _level(structure: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def _finding(code: str, severity: str, claim: str, why: str,
-             evidence_ref: list[str], suggested_fix: str) -> Finding:
+             evidence_ref: list[str], suggested_fix: str,
+             dimension: str = DIMENSION_POSITION) -> Finding:
     return Finding(
         code=code,
         severity=severity,
-        dimension=DIMENSION_POSITION,
+        dimension=dimension,
         delta=RULE_DELTAS.get(code, 0),
         claim=claim,
         why=why,
@@ -3033,6 +3088,11 @@ def evaluate(observation: dict, structure: dict, last_close: float) -> tuple[lis
                     "中枢不贴近现价时，「中枢上方/下方运行」这个标签对当期决策几乎没有参考价值。",
                     [f"chan.levels.{level_name}.nearby_pivots"],
                     "把判断重心转向双底/双顶结构、动能收缩或放大、MACD 交叉与成交量等不依赖中枢的读面",
+                    # 归到「证伪条件」维度：本级别中枢上下沿就是结构位证伪条件，
+                    # 中枢不贴近现价时这个证伪位不可靠。
+                    # 设计文档 §5.1 / 主规格 §5.3 —— anchor-chanlun 要同时贡献
+                    # 「证伪条件」与「位置与时机」两个维度，不能只占后者。
+                    dimension=DIMENSION_FALSIFICATION,
                 ))
                 break
 
@@ -3111,6 +3171,8 @@ def evaluate(observation: dict, structure: dict, last_close: float) -> tuple[lis
                     "现价在中枢内部时，该中枢上下沿就是天然决胜位。",
                     [f"chan.levels.{level_name}.nearby_pivots"],
                     f"以 {zg} 作确认线、{zd} 作失效线",
+                    # 归到「证伪条件」维度：这条 finding 说的就是失效线在哪。
+                    dimension=DIMENSION_FALSIFICATION,
                 ))
                 break
 
@@ -3154,6 +3216,39 @@ from typing import Any
 from ...reviewers.contract import Finding, HorizonHint, ProposedInvalidation
 
 TOLERANCE_PCT = 0.5
+
+# 档位的保守程度：允许的观察窗口越短 = 越保守。
+# （Task 12 的 resolve_tier 用同一套语义做跨点评师取最保守）
+TIER_RANK = {"short": 0, "mid": 1, "event": 1, "long": 2}
+
+# 点评师**自己的发现**对观察期档位构成上限。
+# 依据是 rules.py 每条规则的 suggested_fix 里已经写明的处置：
+#   「把观察期放在短线档」/「按减仓、观望处理」/「重新检查主张是否已被否定」→ 短线
+#   「按单级别处理」/「降级使用」/「不依赖中枢的读面」→ 不超过中期
+# 没有这张表时，build_horizon_hint 收了 findings 参数却不用，会出现
+# 「finding 说『把观察期放在短线档』，horizon_hint 却给 long」这种自相矛盾的结论。
+FINDING_TIER_CAPS = {
+    "CHAN_HIGHER_LEVEL_DENIES": "short",
+    "CHAN_POSITION_SIZE_CAP": "short",
+    "CHAN_TOP_DIVERGENCE_OVERRIDES": "short",
+    "CHAN_DIRECTION_CONFLICT": "short",
+    "CHAN_SECOND_BUY_NO_BACKING": "short",
+    "CHAN_NESTING_UNCONFIRMED": "mid",
+    "CHAN_WINDOW_THIN": "mid",
+    "CHAN_PIVOT_FAR_FROM_PRICE": "mid",
+}
+
+
+def _cap_from_findings(findings: list[Finding]) -> str | None:
+    """由发现推出档位上限（多条发现取最保守的那个）。"""
+    cap: str | None = None
+    for finding in findings or []:
+        limit = FINDING_TIER_CAPS.get(finding.code)
+        if limit is None:
+            continue
+        if cap is None or TIER_RANK[limit] < TIER_RANK[cap]:
+            cap = limit
+    return cap
 
 
 def _levels(structure: dict[str, Any]) -> dict[str, Any]:
@@ -3268,6 +3363,14 @@ def build_horizon_hint(
         tier = "event"
         rationale = f"存在明确催化剂（{observation.get('trigger')}），按事件驱动锚定"
 
+    # 档位上限：点评师自己的发现不能被自己的观察期建议推翻。
+    # （rules.py 的 suggested_fix 常写着「把观察期放在短线档」；若这里仍给 long，
+    #   同一份结论里就会自相矛盾。）
+    cap = _cap_from_findings(findings)
+    if cap is not None and TIER_RANK.get(cap, 99) < TIER_RANK.get(tier, 0):
+        rationale = f"{rationale}；受本次发现约束，观察期档位降为 {cap}"
+        tier = cap
+
     # 必须传真实的 last_close —— 用 0.0 会让「现价是否落在中枢内部」的判断失效
     checks = [
         {
@@ -3289,7 +3392,7 @@ def build_horizon_hint(
 python -m unittest tests.test_chanlun_rules -v
 ```
 
-Expected: 19 tests PASS（`RulesTests` 11 条 + `SignalsTests` 8 条）
+Expected: 23 tests PASS（`RulesTests` 13 条 + `SignalsTests` 10 条）
 
 - [ ] **Step 6: Commit**
 
@@ -4245,6 +4348,31 @@ class HorizonTests(unittest.TestCase):
         self.assertEqual(plan_result["checks"][0]["desc"], "跌破 22.39")
         self.assertEqual(plan_result["invalidation_triggers"], ["跌破 22.39"])
 
+    def test_plan_checks_keep_the_rationale(self):
+        # rationale 必须跟着 check 一起传到 UI：中枢在头顶时「跌破下沿」的条件已经成立，
+        # 只作结构参考 —— 丢掉 rationale 就会被展示成待触发的失效条件。
+        verdict = ReviewVerdict(
+            reviewer_id="a", reviewer_version="0.1.0", ran_at="t", status="ok", duration_ms=0,
+            data_refs=[], findings=[],
+            proposed_invalidation=[
+                ProposedInvalidation(
+                    desc="跌破 22.39", source="chan.pivot.ZD",
+                    comparator="below", tolerance=0.5, rationale="中枢位于现价上方，只作结构参考",
+                )
+            ],
+            horizon_hint=None, caveats=[],
+        )
+        plan_result = plan({"symbol": "002378"}, [verdict], start="2026-11-24")
+        self.assertEqual(plan_result["checks"][0]["rationale"], "中枢位于现价上方，只作结构参考")
+
+    def test_resolve_tier_prefers_event_over_long(self):
+        # event 的窗口 (5,10,20) 比 long 的 (10,20,40) 更保守，必须取 event。
+        tier, sources = resolve_tier([
+            verdict_with_tier("a", "event"), verdict_with_tier("b", "long"),
+        ])
+        self.assertEqual(tier, "event")
+        self.assertEqual(len(sources), 2)
+
     def test_plan_without_any_hint_still_returns_structure(self):
         plan_result = plan({"symbol": "002378"}, [], start="2026-11-24")
         self.assertIn("tier", plan_result)
@@ -4287,7 +4415,11 @@ TIER_ALLOWED: dict[str, tuple[int, ...]] = {
     "event": (5, 10, 20),
 }
 
-TIER_ORDER = ("short", "mid", "long", "event")
+# 保守程度排序（越靠前越保守，min() 取最保守的那个）。
+# 按**允许窗口**排序，不按字母直觉：event 与 mid 的窗口完全相同 (5,10,20)，
+# 都比 long 的 (10,20,40) 保守。若把 event 排到最后，就会出现
+# 「有点评师说 event（最早 5 天复校）、另一个说 long（最早 10 天）」却选了 long 的怪事。
+TIER_ORDER = ("short", "mid", "event", "long")
 
 
 def _conservative(tier: str) -> int:
@@ -4363,6 +4495,10 @@ def plan(
             "source": item.get("source", ""),
             "comparator": item.get("comparator", ""),
             "tolerance": item.get("tolerance"),
+            # rationale 必须一起带下来：中枢在头顶时，「跌破下沿」的条件**已经成立**，
+            # 只作结构参考、不作为本次的失效判定 —— 丢掉 rationale，下游（Task 15 的 UI）
+            # 会把一条已成立的条件当成待触发条件展示。
+            "rationale": item.get("rationale", ""),
         }
         for index, item in enumerate(proposed)
     ]
@@ -4396,7 +4532,7 @@ def plan(
 python -m unittest tests.test_horizon -v
 ```
 
-Expected: 5 tests PASS
+Expected: 7 tests PASS
 
 - [ ] **Step 5: Commit**
 
