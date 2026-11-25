@@ -6284,11 +6284,22 @@ Expected: exit 0
 然后用 `miniapp` 工具：
 
 ```
+# publish 前先清掉插件包里的运行产物（宿主会把 gitignored 产物一并拷进安装目录）
+python tools/clean-package-artifacts.py
+
 miniapp { action: "publish", pluginId: "agaistock", sourcePath: "<repo>/miniapps/agaistock" }
 miniapp { action: "open",    pluginId: "agaistock" }
 ```
 
 Expected: runtime `running`，open 成功。
+
+> ⚠️ **`clean-package-artifacts.py` 不能省**：在插件包目录里直跑内核且不带
+> `AGAISTOCK_DB` / `AGAISTOCK_DATA_DIR` 时，`config.data_dir()` 回落到
+> `repo_root()/"data"`（插件包副本里的 `repo_root()` 就是**包根**）⇒ 写出包内
+> `data/agaistock.db`（空库）。而**宿主会把 gitignored 产物一并拷进安装目录**
+> （实测 `.pyc` mtime 24/24 相同、18 个早于解包时刻）⇒ 该空库随 publish 进安装产物，
+> 宿主侧读到 0 行、真实数据却在 `context.dataDir` 的库里 → 用户会以为「一条观察都没有」。
+> `python tools/clean-package-artifacts.py --check` 只检查、发现残留时退出码 1。
 
 - [x] **Step 2: 在 Browser 中验证全链路**
 
