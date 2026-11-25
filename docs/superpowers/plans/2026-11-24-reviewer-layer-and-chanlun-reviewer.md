@@ -10051,7 +10051,11 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 // 而 **argparse 对重复的 --db 取最后一个** ⇒ DB 真落进插件目录。
 //
 // 这里把断言落在**唯一产生 argv 的地方**（runKernel 的 spawnFn 边界）——
-// 抓到的 argv 就是进程实际收到的参数 ⇒ 任何上游层的动手脚都躲不掉。
+// 抓到的 argv 就是进程实际收到的参数。
+// ⚠️ 但这条断言**只有在收集方式与 argparse 的语义一致时**才成立：
+// `--db VALUE` / `--db=VALUE` / `--d VALUE` / `--d=VALUE` 四种写法等价，
+// 且重复出现时 argparse 取**最后一个** —— 只认 standalone 的 `--db` token
+// 会让另外三种形态逃得过它（fix round 7 的 Important 1）。
 test('the kernel subprocess argv carries exactly the host db path', async () => {
   const captured = [];
   const fakeChild = {
@@ -10203,7 +10207,10 @@ fix round 5 新增的 `the kernel subprocess argv carries exactly the host db pa
 > round 5 锚在「`runKernel` 直调的 **argv**」—— 每次都差一层。
 > **本轮把断言补在「默认工厂 → spawnFn」这条路径上**：
 > 它是**生产路径**（宿主不传 `deps` 时走的就是它），
-> 且 `handleRoute` / 默认工厂 / `runKernel` 三层的 argv **都在 spawnFn 边界汇聚** ⇒ 一次补全，三层同堵。
+> 且 `handleRoute` / 默认工厂 / `runKernel` 三层的 argv **都在 spawnFn 边界汇聚**
+> ⇒ **一处断言可以覆盖三层** —— **前提是**①收集方式与 argparse 的语义一致、
+> ②**覆盖每一条路由**（否则按路由分派的变异仍然看不见）。
+> ⚠️ 本条表述在 fix round 7 的复审里被**反例变异直接证伪**（内联形态 + 路由分派都能溜过去）。
 
 **Minor 1 —— fix round 5 把 Minor 1 的判据改窄了（覆盖回退）**：
 新判据只排除「**恰好等于插件根**」，而插件根**下面**的 `agaistock.db`
@@ -10279,8 +10286,10 @@ import { join, sep } from 'node:path';
 });
 ```
 
-> **为什么这条是终态**：`handleRoute` 的 args → 默认工厂 → `runKernel` → **spawnFn**，
-> 三层的 argv **都在 spawnFn 边界汇聚** ⇒ 在这里断言 argv，一次堵住三层。
+> **为什么这条能覆盖三层**：`handleRoute` 的 args → 默认工厂 → `runKernel` → **spawnFn**，
+> 三层的 argv **都在 spawnFn 边界汇聚** ⇒ 在这里断言 argv 可以覆盖三层。
+> ⚠️ **但「终态」这个说法过强** —— fix round 7 的复审用内联形态与路由分派两种变异证伪了它：
+> 收集方式必须与 argparse 的语义一致，且必须覆盖每一条路由，否则仍然漏。
 
 **1c) 修 Minor 1 的判据**（`the kernel db path never falls back to the plugin dir`）：
 
@@ -10771,6 +10780,157 @@ git commit -m "test: collect --db by argparse semantics and cover every route" -
 
 > **不要用 `git add -A`**（Global Constraint 14）。
 > 本轮**不改 `server.mjs`、不改 `src/agaistock/**`**。
+
+---
+
+### Task 20 · fix round 8 — 修 fix round 7 **自己引入的回归**（cwd 依赖）+ env 通道补齐
+
+> **来源**：Task 20 fix round 7 的 scoped 复审（verifier）—— **PASS-WITH-MINORS**，
+> **0 Critical / 0 Important / 3 Minor / 4 Nit**。
+> 上一轮的 I1 / I2 / M1 **全部闭合**（评审方独立复现了「先红后绿」）。
+> 但本轮**引入了一条回归**（Minor 1），且有两条文档过度断言仍被证伪。
+
+**fix round 7 做对了三件要紧事**（评审方独立复现）：
+内联 / 缩写形态（11 组）、路由分派（5 组）、路径拼写（3 组）—— 修复前**全漏** → 修复后**全捕获**；
+且评审方实测默认工厂护栏**确实观测到 5 次 spawn（五条路由各一次）**。
+
+---
+
+**Minor 1（headline，本轮引入的回归）：新判据 `resolve(value || '.')` 把「空 dbPath」解析成 **cwd**。**
+
+fix round 7 为修「`/` 分隔 / 大小写变体漏过」而引入的归一化判据是：
+
+```javascript
+const target = resolve(value || '.');
+```
+
+`resolve('')` 在 Windows 上返回 **cwd**。而这条测试**故意不传** `dbPath`
+⇒ `handleRoute` 的默认值 `''` 被传下去 ⇒ `value` 是空串 ⇒ `target` = cwd。
+⇒ **cwd 恰好等于插件根时**（`cd miniapps/agaistock && node --test "test/*.test.mjs"`
+就是这个情形），断言 `target !== pluginRoot` **假失败**。
+
+控制器**独立复现**（不采信评审结论）：
+
+```
+cwd = D:\workroom\agaistock                → tests 69 / pass 69 / fail 0
+cwd = D:\workroom\agaistock\miniapps\agaistock → tests 69 / pass 68 / fail 1   ← 回归
+```
+
+评审方在**中性路径**（路径名不含 `agaistock`）下用 **cwd = 中性包自己** 也复现了同一条。
+⇒ **控制器上一轮的中性脚本用 `cwd=ROOT`（仓库根）⇒ 看不见这条** ——
+这是「控制器自己的验证脚本有盲区」的**第 7 次**。
+
+**修法：空 dbPath 不是路径 —— 不能拿 `resolve()` 解析它。**
+空值本身是对的（`handleRoute` 传 `--db ''`，内核 `_default_db()` 看到空串会回落到 env 通道，
+env 通道另有断言）；判据只在**值非空**时做「不在插件根之下」的归一化比较。
+
+**Minor 2：fix round 6 的 Minor 3 只闭合了一半。**
+过度断言「任何上游层……的动手脚都躲不掉」在 `api.test.mjs` 里已改，
+但**计划 round-5 小节的代码块注释**（`:10053-10054`）里那句**原封不动** ⇒ 本轮一并订正。
+
+**Minor 3：env 通道仍只对 `captured[0]` 断言。**
+默认工厂那条护栏虽然已经**每次 spawn** 断言 argv，但 env（`AGAISTOCK_DB` /
+`AGAISTOCK_DATA_DIR` / `PYTHONPATH`）与 cwd 仍只断言第一条 spawn
+⇒ 「只对某条路由改写 env」的变异（env 是一条**独立**的落点通道）仍然漏过。
+⇒ 本轮把 env / cwd 断言也推进 `captured.forEach`。
+
+**Nit 1**：第四条 argv 断言（`start() gives the host data dir to every kernel call`）
+仍是旧的 `indexOf('--db')` ⇒ 内联 / 缩写形态从那里溜过去。本轮一并改用 `collectDbValues`。
+
+**Nit 2**：控制器那份变异脚本的**崩溃特征只扫「最后一个 `not ok` 之后的尾巴」**
+⇒ 后面某个测试崩了会掩盖前面真实的捕获。本轮改成**逐个失败块**取文本，
+崩溃特征只在**该护栏测试自己的块**里找。
+
+**Nit 3**：控制器给评审方的简报里写「改写族修复前必须漏过」—— **与事实不符**：
+改写族（把已有的 `--db` **改写**成另一种写法，而不是**追加**）在 fix round 7 **之前**就已被捕获。
+真正「修复前漏过」的是**追加族**（内联 / 缩写 / 路由分派）。简报措辞本轮订正。
+
+**Nit 4**：计划 round-6 小节里两句已被证伪的断言（「一次补全，三层同堵」、
+「为什么这条是终态……一次堵住三层」）本轮订正。
+
+---
+
+**修法（全部只动断言，不动 `server.mjs`）**：
+
+- **Step 1**：Minor 1 的判据 —— 空 dbPath **不当路径**；非空才做归一化比较。
+- **Step 2**：Minor 3 —— env / cwd 断言推进到**每一次** spawn。
+- **Step 3**：Nit 1 —— 第四条 argv 断言改用 `collectDbValues`。
+- **Step 4**：Nit 2 —— 控制器的变异脚本判据改成**逐失败块**判崩溃。
+- **Step 5**：Nit 3 / Nit 4 / Minor 2 —— 订正简报与计划里被证伪的表述。
+- **Step 6**：控制器的中性脚本**必须跑两个 cwd**（包的父目录 + 包自己）——
+  这是**能提前抓住 Minor 1 那类回归**的那一项。
+
+**Files:**
+- Modify: `miniapps/agaistock/test/api.test.mjs`
+- Modify: `docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md`
+
+> ⚠️ **本轮仍不改 `server.mjs`、不改 `src/agaistock/**`** —— 实现本身**正确**
+> （评审方实测未改动实现上所有路径参数都对）。
+
+- [ ] **Step 1: 修 Minor 1 的判据（`api.test.mjs`）**
+
+```javascript
+  const pluginRoot = resolve(join(import.meta.dirname, '..'));
+  const dbValues = collectDbValues(calls[0]);
+  assert.ok(dbValues.length > 0, '内核调用必须带 --db');
+  const value = dbValues[0];
+  // ⚠️⚠️ **空 dbPath 不是路径** —— 不能拿 `resolve()` 把它解析成 **cwd**！
+  //    cwd 恰好等于插件根时这条会**假失败**。
+  if (value) {
+    const target = resolve(value);
+    assert.ok(
+      target !== pluginRoot
+        && !target.toLowerCase().startsWith(pluginRoot.toLowerCase() + sep),
+      `没给 dbPath 时不许回落到插件目录，实际 ${value}`,
+    );
+  }
+```
+
+- [ ] **Step 2: env / cwd 断言推进到每一次 spawn**
+
+把默认工厂那条测试里的
+
+```javascript
+  assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, dataDir);
+  assert.equal(captured[0].env.AGAISTOCK_DB, join(dataDir, 'agaistock.db'));
+  assert.equal(captured[0].env.PYTHONPATH, join(pluginRoot, 'src'));
+  assert.equal(captured[0].cwd, pluginRoot);
+```
+
+整段挪进 `captured.forEach(...)`，并对 `AGAISTOCK_DATA_DIR` / `AGAISTOCK_DB` /
+`PYTHONPATH` / `cwd` **每一条**都断言。
+
+- [ ] **Step 3: 第四条 argv 断言改用 `collectDbValues`**
+
+- [ ] **Step 4: 控制器的变异脚本判据改成逐失败块**
+
+- [ ] **Step 5: 订正计划与简报里被证伪的表述**
+
+- [ ] **Step 6: 中性脚本跑两个 cwd**
+
+**验收（必做）**：
+
+```bash
+python -m unittest discover -s tests -t .
+node --test "miniapps/agaistock/test/*.test.mjs"
+node --check miniapps/agaistock/miniapp/node/server.mjs
+node tools\check-spec.mjs docs\superpowers\plans\2026-11-24-reviewer-layer-and-chanlun-reviewer.md --external docs\superpowers\specs\2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md --external docs\superpowers\specs\2026-11-24-stock-review-app-architecture.md
+```
+
+**双 cwd 验证（必做，本轮新增）**：
+
+```bash
+node --test "miniapps/agaistock/test/*.test.mjs"                    # cwd = 仓库根
+cd miniapps\agaistock; node --test "test/*.test.mjs"                # cwd = 插件包自己
+```
+
+**中性路径（必做，两个 cwd 都跑）**：路径名**不含** `agaistock`，
+且 **cwd = 中性包的父目录** 与 **cwd = 中性包自己** 两种情形下基线都必须全绿。
+
+**变异验证（必做）**：控制器提供 `.tmp\task20-fix8\probe.py`
+（判据升级为逐失败块；新增 **V14/V15/V16** 三组**路由分派的 env 通道**变异）。
+**预期**：全部 18 组（13 组旧洞 + 3 组 env 新洞 + 2 组回归对照）**必须捕获**；
+阴性对照必须报**漏过**；harness 自校验必须报**假捕获**。
 
 ---
 
