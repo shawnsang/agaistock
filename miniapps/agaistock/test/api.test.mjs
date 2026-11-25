@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import test from 'node:test';
 
 import { handleRoute, buildKernelEnv, kernelDbPath, runKernel, start } from '../miniapp/node/server.mjs';
@@ -64,6 +64,39 @@ function fakeKernel(result) {
   };
   kernel.calls = calls;
   return kernel;
+}
+
+/**
+ * 按 **argparse 的语义**收集 argv 里**所有**能设置 `--db` 的取值。
+ *
+ * argparse 默认 `allow_abbrev=True` ⇒ `--db` 有**四种**等价写法
+ * （控制器用真实内核实测过，见计划 fix round 7 小节）：
+ *   `--db VALUE`（standalone）、`--db=VALUE`（内联）、
+ *   `--d VALUE`（缩写 standalone）、`--d=VALUE`（缩写内联）。
+ * 重复出现时 argparse 取**最后一个** —— 所以要**收集全部**再逐个比对。
+ *
+ * ⚠️ `--database` / `--de` / `--dbx` / `--debit` 都会被 argparse **拒绝**
+ * （前缀不匹配），它们不是合法写法；护栏既不必认，也不能把它们当成 db 取值放过。
+ *
+ * ⚠️ 只认 standalone 的 `--db` token 会让另外三种形态**整个溜过去** ——
+ *    那是 fix round 7 的 Important 1（真实内核实测：DB 会落进插件包目录）。
+ */
+const DB_OPTION_NAMES = new Set(['d', 'db']);
+
+function collectDbValues(argv) {
+  const values = [];
+  argv.forEach((value, index) => {
+    if (typeof value !== 'string' || !value.startsWith('--')) return;
+    const eq = value.indexOf('=');
+    const name = eq === -1 ? value.slice(2) : value.slice(2, eq);
+    if (!DB_OPTION_NAMES.has(name)) return;
+    if (eq === -1) {
+      if (index + 1 < argv.length) values.push(argv[index + 1]);
+    } else {
+      values.push(value.slice(eq + 1));
+    }
+  });
+  return values;
 }
 
 test('DELETE /api/observations/:id returns 200 when kernel succeeds', async () => {
@@ -427,12 +460,22 @@ test('the default kernel factory hands the host context to the kernel unchanged'
   };
   const { base, root: pluginRoot } = await makeScratchPluginRoot();
   const dataDir = join(base, 'data');
+  await mkdir(dataDir, { recursive: true });
   const context = {
     dataDir,
     pluginRoot,
     listen: { port: 0, host: '127.0.0.1' },
     signal: new AbortController().signal,
   };
+  // ⚠️ **五条路由都要跑** —— 只跑第一条，**按路由分派**的变异就完全看不见
+  // （fix round 7 的 Important 2）。每条路由都必须真的调到内核。
+  const routes = [
+    ['GET', '/api/status'],
+    ['GET', '/api/observations'],
+    ['GET', '/api/observations/obs_1/reviews'],
+    ['POST', '/api/review'],
+    ['DELETE', '/api/observations/obs_1'],
+  ];
   const handle = await start(context, {
     spawnFn: (command, argv, options) => {
       captured.push({ command, argv, env: options.env, cwd: options.cwd });
@@ -440,13 +483,22 @@ test('the default kernel factory hands the host context to the kernel unchanged'
     },
   });
   try {
-    const response = await fetch(`http://127.0.0.1:${handle.port}/api/observations`);
-    assert.equal(response.status, 200);
+    for (const [method, path] of routes) {
+      const init = { method };
+      if (method === 'POST') {
+        init.headers = { 'content-type': 'application/json' };
+        init.body = JSON.stringify({ text: '章源钨业看多' });
+      }
+      await fetch(`http://127.0.0.1:${handle.port}${path}`, init);
+    }
   } finally {
     await handle.dispose();
     await rm(base, { recursive: true, force: true });
   }
-  assert.ok(captured.length > 0, '生产路径必须真的 spawn 了内核');
+  assert.ok(
+    captured.length >= routes.length,
+    `生产路径必须每条路由都 spawn 了内核，实际 ${captured.length} 次`,
+  );
   assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, dataDir);
   assert.equal(captured[0].env.AGAISTOCK_DB, join(dataDir, 'agaistock.db'));
   assert.equal(captured[0].env.PYTHONPATH, join(pluginRoot, 'src'));
@@ -455,16 +507,21 @@ test('the default kernel factory hands the host context to the kernel unchanged'
   //（src/agaistock/cli.py:26-32）⇒ env 对了不代表 DB 落点对。
   // 这里是**默认内核工厂**这条路径（宿主不传 deps 时走的就是它），
   // 所以工厂往 args 里塞/改写 `--db` 也必须被抓到。
-  // 收集 argv 里**所有** --db 的取值（argparse 取最后一个，只看第一个会被绕过）。
-  const dbValues = [];
-  captured[0].argv.forEach((value, index) => {
-    if (captured[0].argv[index - 1] === '--db') dbValues.push(value);
+  //
+  // ⚠️ **每一次 spawn 都要断言**，不能只看 `captured[0]` ——
+  // 路由分派型变异（只对某条路由动手脚）对第一条路由完全不可见。
+  //
+  // ⚠️ 收集方式必须**按 argparse 的语义**：`--db VALUE` / `--db=VALUE` /
+  // `--d VALUE` / `--d=VALUE` 四种写法等价，且重复出现取最后一个。
+  const expectedDb = join(dataDir, 'agaistock.db');
+  captured.forEach((call, index) => {
+    const dbValues = collectDbValues(call.argv);
+    assert.deepEqual(
+      dbValues,
+      [expectedDb],
+      `第 ${index + 1} 次 spawn 的 --db 必须是宿主给的路径，实际 ${JSON.stringify(dbValues)}`,
+    );
   });
-  assert.deepEqual(
-    dbValues,
-    [join(dataDir, 'agaistock.db')],
-    `默认内核工厂递给内核的 --db 必须是宿主给的路径，实际 ${JSON.stringify(dbValues)}`,
-  );
 });
 
 test('start() keeps the observation file in the host data dir, not the plugin dir', async () => {
@@ -544,11 +601,13 @@ test('every kernel call carries the host db path', async () => {
     }
     assert.ok(calls.length >= routes.length, '每条路由都必须真的调内核');
     for (const args of calls) {
-      const dbIdx = args.indexOf('--db');
-      assert.ok(dbIdx >= 0, `内核调用必须带 --db：${JSON.stringify(args)}`);
-      assert.equal(
-        args[dbIdx + 1],
-        dbPath,
+      // ⚠️ 收集方式必须**按 argparse 的语义** —— `--db VALUE` / `--db=VALUE` /
+      // `--d VALUE` / `--d=VALUE` 四种写法等价。只用 `indexOf('--db')` 的话，
+      // 内联与缩写形态整个看不见（fix round 7 的 Important 1）。
+      const dbValues = collectDbValues(args);
+      assert.deepEqual(
+        dbValues,
+        [dbPath],
         `--db 必须是宿主给的数据库路径：${JSON.stringify(args)}`,
       );
     }
@@ -690,18 +749,21 @@ test('the kernel db path never falls back to the plugin dir', async () => {
   await handleRoute(makeRequest('GET', '/api/observations'), response, { kernel });
   assert.equal(response.statusCode, 200);
   assert.ok(calls.length > 0, '内核必须被调用');
-  const dbIdx = calls[0].indexOf('--db');
-  assert.ok(dbIdx >= 0, '内核调用必须带 --db');
   // ⚠️ 不能用 `!value.includes('agaistock')` —— 那依赖**仓库目录名恰好含该子串**，
   // 换个路径名（安装副本、CI 的临时目录）这条就形同虚设。
-  // 判据是「**恰好等于插件根目录**才算回落」—— 与目录名无关。
+  // 判据是「**不在插件根目录之下**才算回落」—— 与目录名无关。
   // ⚠️ 不能只排除「恰好等于插件根」—— 插件根**下面**的 agaistock.db 也要排除
   // （那才是内核真正会写的那个文件）。
-  // 也不能用 `!value.includes('agaistock')` —— 那依赖**仓库目录名恰好含该子串**。
-  const pluginRoot = join(import.meta.dirname, '..');
-  const value = calls[0][dbIdx + 1];
+  // ⚠️ 必须**归一化**再比：`/` 分隔与大小写差异在 Windows 上都指向同一个目录，
+  // 裸 `startsWith` 会漏掉这两种拼写（fix round 7 的 Minor 1）。
+  const pluginRoot = resolve(join(import.meta.dirname, '..'));
+  const dbValues = collectDbValues(calls[0]);
+  assert.ok(dbValues.length > 0, '内核调用必须带 --db');
+  const value = dbValues[0];
+  const target = resolve(value || '.');
   assert.ok(
-    value !== pluginRoot && !value.startsWith(pluginRoot + sep),
+    target !== pluginRoot
+      && !target.toLowerCase().startsWith(pluginRoot.toLowerCase() + sep),
     `没给 dbPath 时不许回落到插件目录，实际 ${value}`,
   );
 });
@@ -748,6 +810,44 @@ test('the review draft follows the db path when no data dir is given', async () 
   }
 });
 
+test('the review draft never falls back to the plugin dir', async () => {
+  // `handleRoute` 的 `draftDir = dataDir || dirname(dbPath)` ——
+  // `dataDir` 为空时**必须**落在 dbPath 所在目录，**不能**回落到插件目录
+  // （那是安装产物，重装会被覆盖）。
+  // ⚠️ 此前所有草稿断言都**传了** dataDir ⇒ 这个回落分支零护栏
+  // （fix round 6 复审的 Nit 2）。
+  const calls = [];
+  const kernel = async (args) => {
+    calls.push(args);
+    return { code: 0, stdout: '{"ok":true}', stderr: '' };
+  };
+  const base = await mkdtemp(join(tmpdir(), 'agaistock-draftfallback-'));
+  const dbDir = join(base, 'db');
+  await mkdir(dbDir, { recursive: true });
+  try {
+    const dbPath = join(dbDir, 'agaistock.db');
+    const response = new FakeResponse();
+    await handleRoute(
+      makeRequest('POST', '/api/review', {
+        text: '章源钨业看多',
+        observation: { symbol: '002378', thesis: 'x' },
+      }),
+      response,
+      { kernel, dbPath }, // ← 故意**不传** dataDir
+    );
+    assert.equal(response.statusCode, 200);
+    const idx = calls[0].indexOf('--observation-file');
+    assert.ok(idx >= 0, '结构化草稿必须经 --observation-file 传给内核');
+    assert.equal(
+      dirname(calls[0][idx + 1]),
+      dbDir,
+      `dataDir 为空时草稿必须落在 dbPath 所在目录，实际 ${calls[0][idx + 1]}`,
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 
 // ---- argv 通道的最后一公里（fix round 5）----
 // 上一轮的六条断言的是**内核回调收到的 args**（handleRoute 那一层），
@@ -756,7 +856,11 @@ test('the review draft follows the db path when no data dir is given', async () 
 // 而 **argparse 对重复的 --db 取最后一个** ⇒ DB 真落进插件目录。
 //
 // 这里把断言落在**唯一产生 argv 的地方**（runKernel 的 spawnFn 边界）——
-// 抓到的 argv 就是进程实际收到的参数 ⇒ 任何上游层的动手脚都躲不掉。
+// 抓到的 argv 就是进程实际收到的参数。
+// ⚠️ 但这条断言**只有在收集方式与 argparse 的语义一致时**才成立：
+// `--db VALUE` / `--db=VALUE` / `--d VALUE` / `--d=VALUE` 四种写法等价，
+// 且重复出现时 argparse 取**最后一个** —— 只认 standalone 的 `--db` token
+// 会让另外三种形态逃得过它（fix round 7 的 Important 1）。
 test('the kernel subprocess argv carries exactly the host db path', async () => {
   const captured = [];
   const fakeChild = {
@@ -778,16 +882,24 @@ test('the kernel subprocess argv carries exactly the host db path', async () => 
     },
   );
   assert.equal(captured.length, 1);
-  // 收集 argv 里**所有** --db 的取值 —— 不能只看第一个：
-  // argparse 对重复的 --db 取**最后一个**，只看第一个会被绕过。
-  const dbValues = [];
-  captured[0].argv.forEach((value, index) => {
-    if (captured[0].argv[index - 1] === '--db') dbValues.push(value);
-  });
+  // 收集 argv 里**所有**能设置 --db 的取值 —— 不能只看第一个：
+  // argparse 对重复的 --db 取**最后一个**，只看第一个会被绕过；
+  // 而且 `--db VALUE` / `--db=VALUE` / `--d VALUE` / `--d=VALUE` 四种写法等价，
+  // 只认 standalone 的 `--db` token 会让另外三种整个溜过去。
+  const dbValues = collectDbValues(captured[0].argv);
   assert.deepEqual(
     dbValues,
     [hostDb],
     `argv 里必须只有一个 --db 且是宿主给的路径，实际 ${JSON.stringify(dbValues)}`,
+  );
+  // ⚠️ argv **前缀**也要断言 —— `-S` 是运行时的硬约束（editable 安装的
+  // meta-path finder 优先级高于 PYTHONPATH ⇒ 不加 `-S` 会命中仓库里那份内核，
+  // 「内核随包走」就成了一句空话），`-m agaistock.cli` 决定跑的是哪个模块。
+  // 这两层此前零护栏（fix round 6 复审的 Nit 1）。
+  assert.deepEqual(
+    captured[0].argv.slice(0, 3),
+    ['-S', '-m', 'agaistock.cli'],
+    `内核子进程必须以 python -S -m agaistock.cli 启动，实际 ${JSON.stringify(captured[0].argv.slice(0, 3))}`,
   );
   assert.equal(captured[0].env.AGAISTOCK_DB, hostDb);
   assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
