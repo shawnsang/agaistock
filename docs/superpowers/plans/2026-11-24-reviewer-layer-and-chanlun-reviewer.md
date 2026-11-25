@@ -10936,6 +10936,278 @@ cd miniapps\agaistock; node --test "test/*.test.mjs"                # cwd = 插�
 
 ---
 
+### Task 21: 同一标的的观察**续接** —— 补充、更新、结合之前的分析/讨论/评价
+
+> **来源**：用户需求（2026-11-25）：
+> 「同一只股票，如果已经记录过，新的记录应该进行补充，更新，结合之前的分析，讨论，评价，继续深入，
+> 要有延续性，而不是新开一条记录。」
+>
+> **这正是设计 §16.4 里推迟的「观察版本链（`supersedes_id`）」** ——
+> 该项被推迟的直接原因是「采纳」按钮需要它；本轮把它建起来。
+
+**现状（已核实）**：`POST /api/review` 每调一次就 `insert_observation` **新建一行**。
+宿主真实库里 002378 有 **3 行**存活记录 + 2 行软删 —— 那是**三条互不相干的记录**，
+而不是一条持续深入的观察。观察库的计数也因此是「行数」而不是「标的数」。
+
+**本轮目标**：同一 symbol 的后续输入**续接**同一条观察线程 ——
+视图取新、积累项取并集、点评历史整条线程可见、观察期**锚定在线程起点**。
+
+---
+
+#### 1. 存储模型：版本链（append-only，不破坏「只追加不修改」的不变量）
+
+`observations` 加两列：
+
+```sql
+ALTER TABLE observations ADD COLUMN supersedes_id TEXT;  -- 本版本取代的那一行
+ALTER TABLE observations ADD COLUMN thread_id      TEXT;  -- 线程根行的 id（同线程所有版本相同）
+```
+
+**一条观察线程（thread）= 一个标的一条持续观察**，由多个版本行组成：
+第一版 `supersedes_id IS NULL`、`thread_id = 自己的 id`；
+后续每版 `supersedes_id = 上一版的 id`、`thread_id = 线程根 id`。
+
+**旧行永不改写** —— 合并的结果写在**新版本行**里。
+这正是设计 §6.3 说的「append-only，新版本行 + supersedes_id」。
+
+#### 2. 合并语义（`src/agaistock/continuation.py`，纯函数、可单测）
+
+| 字段 | 规则 | 理由 |
+|---|---|---|
+| `direction` | 新的优先，**但新的为 `neutral` 时保留旧的** | 本代码库里 `neutral` 是「没有表态」：关键词解析在文本无方向词时给 `neutral`，LLM 在用户没表态时也给 `neutral`。若「新的非空就取新的」，一次纯补充（"产量翻倍确认了"）会把方向悄悄抹成中性 |
+| `thesis` | 用新的 | 主张就是「当前观点」；补充即更新。旧主张在版本链里逐版保留 |
+| `timeframe` / `trigger` | 新的优先，新的为空才回退旧的 | 用户没说就不该被覆盖 |
+| `position` | 逐键合并：新的非空值覆盖旧的 | `position = {entry, size}`，两个键可能只更新一个 |
+| `confidence` | 新的 > 0 才用新的，否则沿用旧的 | 代码库里 `0.0` 表示「未提供」（兜底关键词解析给 0.0） |
+| `evidence` | **并集**（按 text 去重，旧的在前、新的在后） | 「结合之前的分析」—— 依据是累积的 |
+| `invalidation` | **并集**（按文本去重） | 证伪条件是**用户自己的判断标准**；合并的是用户自己前后两次说的话，**不是点评师写的**（§2.2 硬约束不变：点评师仍然不自动写） |
+| `raw_text` | 用新的 | 旧的原文在版本链里逐版保留 |
+
+合并结果**不得**带回上一版的 `id` / `thread_id` / `supersedes_id` / `deleted_at` /
+`created_at` —— `id` 会被 `insert_observation` 当主键用（撞主键），
+版本链的三列由调用方决定。
+
+#### 3. 观察期**锚定在线程起点**
+
+`horizon.plan(..., start=...)` 的 `start` 用**线程第一版的创建日**，而不是今天。
+
+**理由**：观察期是「到期结算」的时钟。如果每次补充都从今天重新起算，
+用户可以靠反复补充**无限顺延**结算日 —— 到期校准就废了。
+锚定在线程起点 ⇒ 结算日由一个**固定锚点**决定：
+
+- 档位不变时，**重复补充不会改变结算日**（这是要守住的不变量）；
+- 档位变了（点评师的判断变了）时，结算日按新档位重算 —— 那是**判断变了**，不是用户靠多说几句话延期。
+
+#### 4. 列表：一个线程一行
+
+- `cmd_list` 默认返回**线程头**（每个线程一行），带
+  `thread_id` / `version`（第几版）/ `version_count` / `first_seen_at` / `supersedes_id`。
+- 常态下一个 symbol 一条线程 ⇒ 列表一个 symbol 一行；
+  只有显式用 `--new-thread` 开了第二条线程时，同一 symbol 才会出现两行（两条**独立**观察）。
+- `--all-versions` 返回全部原始行（调试/审计用）。
+- `countObservations` 因此从「行数」变成「线程数」—— 观察库标题的计数回到用户直觉。
+
+#### 5. 点评：返回**整条线程**的历史
+
+`cmd_reviews <observation_id>`：把 id 解析到它的 `thread_id`，
+返回该线程**所有版本**的点评，每条带上版本号与所属版本行。
+`cmd_review` 的返回体里同时带 `history`（前几轮的点评），
+前端因此能显示「上一轮点评说了什么」。
+
+#### 6. 删除：软删**整条线程**
+
+删线程头 ⇒ 该线程**所有版本**一起软删（`deleted_at`）。
+理由：列表只显示存活线程头；若只删头，上一版会「复活」成新线程头，用户会看到一条
+「从没被删过」但内容变旧的记录。`reviews` 记录**保留**（§7.1 的审计要求）。
+
+#### 7. 逃生口：`--new-thread`
+
+同一标的想开一条**真正独立**的记录时用（不同视角、不同仓位的另一次判断）。
+默认**续接**。Mini App 侧在观察卡上给一个复选框（「另开一条记录」），
+选中时接入层给内核加 `--new-thread`。
+
+#### 8. 标的识别兜底
+
+`symbol` 为空时（用户只说股票简称、模型没解析出代码），按 `name` **唯一**匹配已有线程；
+匹配到多条时**不续接**（宁可新开一条，也别接错标的）。
+
+---
+
+**Files:**
+- Modify: `src/agaistock/storage/db.py`（两列 + 迁移 + 线程查询）
+- Create: `src/agaistock/continuation.py`（合并语义，纯函数）
+- Modify: `src/agaistock/cli.py`（`cmd_review` 续接、`cmd_list` 线程视图、`cmd_reviews` 线程历史、`--new-thread`）
+- Modify: `src/agaistock/storage/__init__.py`（若需要导出）
+- Modify: `miniapps/agaistock/src/agaistock/**`（**内核副本**，改完必须 `python tools/sync-kernel.py`）
+- Modify: `miniapps/agaistock/miniapp/client/index.html`（观察库一行一标的 + 版本标记 + 历史点评 + 「另开一条记录」）
+- Modify: `miniapps/agaistock/miniapp/client/render.mjs`（渲染）
+- Modify: `miniapps/agaistock/miniapp/node/server.mjs`（`--new-thread` 透传）
+- Modify: `tests/test_storage.py`、`tests/test_cli.py`、新增 `tests/test_continuation.py`
+- Modify: `miniapps/agaistock/test/api.test.mjs`、`miniapps/agaistock/test/render.test.mjs`
+- Modify: `docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md`（§16.4 与 §6.3 的注记）
+
+> ⚠️ **「采纳」按钮本轮仍禁用** —— 用户的需求不包含它。
+> 但版本链建起来之后，它的前置条件已经满足，留给下一轮启用。
+
+- [ ] **Step 1: 存储层加版本链（`storage/db.py`）**
+
+```python
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS observations (
+    ...
+    raw_text      TEXT,
+    deleted_at    TEXT,
+    supersedes_id TEXT,
+    thread_id     TEXT
+);
+"""
+
+_MIGRATIONS = (
+    ("observations", "evidence_json", "TEXT"),
+    ("observations", "invalidation_json", "TEXT"),
+    ("observations", "supersedes_id", "TEXT"),
+    ("observations", "thread_id", "TEXT"),
+)
+```
+
+`insert_observation(conn, observation, *, supersedes_id=None, thread_id=None)`：
+`thread_id` 缺省时取 `obs_id`（自己就是根）；`supersedes_id` 缺省 `NULL`。
+
+新增查询与写入：
+
+```python
+def find_thread_head(conn, symbol, name="") -> dict | None:
+    """该 symbol（或 name）的**最新存活版本**行；没有则 None。"""
+
+def thread_started_at(conn, thread_id) -> str:
+    """线程第一版的 created_at（观察期的锚点）。"""
+
+def thread_versions(conn, thread_id) -> list[dict]:
+    """线程的全部版本行，按时间升序。"""
+
+def resolve_thread_id(conn, observation_id) -> str | None:
+    """任意一行的 id → 它的线程根 id。"""
+
+def list_threads(conn, include_deleted=False) -> list[dict]:
+    """每个线程一行（存活线程的头），带版本计数与首见时间。"""
+
+def soft_delete_thread(conn, observation_id) -> bool:
+    """软删**整条线程**的所有版本。"""
+```
+
+- [ ] **Step 2: 合并语义（新建 `src/agaistock/continuation.py`）**
+
+```python
+"""同一标的的观察续接：新输入如何并进上一版。
+
+规则（见计划 §2）：
+  - **观点**（方向/主张/时限/触发/仓位）取新的；
+  - **积累项**（依据 / 证伪条件）取并集；
+  - 证伪条件的并集**只并用户自己前后两次说的话** ——
+    点评师仍然不自动写 observation（设计 §2.2 硬约束）。
+"""
+
+def merge_into_previous(previous: dict, incoming: dict) -> dict:
+    ...
+```
+
+纯函数、无 I/O ⇒ 可直接单测。
+
+- [ ] **Step 3: CLI 续接（`cli.py`）**
+
+`cmd_review`：
+
+```python
+        observation = _load_structured_observation(
+            args.observation_file, args.symbol, args.name, args.text
+        )
+        # 续接：同一 symbol 的最新存活版本 —— 新输入并进同一条线程。
+        previous = (
+            None
+            if args.new_thread
+            else db.find_thread_head(conn, observation["symbol"], observation.get("name", ""))
+        )
+        if previous:
+            observation = continuation.merge_into_previous(previous, observation)
+        thread_id = previous.get("thread_id") or previous["id"] if previous else None
+        observation_id = db.insert_observation(
+            conn, observation,
+            supersedes_id=previous["id"] if previous else None,
+            thread_id=thread_id,
+        )
+```
+
+观察期锚点：
+
+```python
+        # 观察期锚定在线程起点 —— 续接**绝不**顺延结算日。
+        start = (
+            db.thread_started_at(conn, thread_id)
+            if previous
+            else date.today().isoformat()
+        )
+        plan = horizon_mod.plan(observation, verdicts, start=start)
+```
+
+`cmd_list` 改为按线程返回（`--all-versions` 走原始行）；
+`cmd_reviews` 返回整条线程的点评；新增 `--new-thread` 参数。
+
+- [ ] **Step 4: 内核副本同步**
+
+```bash
+python tools/sync-kernel.py
+python tools/sync-kernel.py --check
+```
+
+- [ ] **Step 5: 前端（观察库一行一标的 + 历史点评）**
+
+`render.mjs` / `index.html`：
+- 观察库表格每个线程**一行**；
+- 行上标「第 N 版」与首次记录时间；
+- 点评面板在最新一轮之外，列出**前几轮**的点评（来自 `history`）；
+- 观察卡上给「另开一条记录」复选框 ⇒ `POST /api/review` 带 `newThread` ⇒ 接入层加 `--new-thread`。
+
+- [ ] **Step 6: 测试**
+
+Python（`tests/test_continuation.py` 新增 + `test_storage.py` / `test_cli.py` 补）：
+- 合并：观点取新、依据/证伪条件并集、证伪条件按文本去重、`direction=neutral` 保留旧方向；
+- 续接：同 symbol 第二次 review ⇒ 同一 thread_id、`supersedes_id` 指上一版、**列表仍只有一行**；
+- 观察期锚点：续接后 `review_at` **不晚于**线程起点算出的日期；
+- 删除：删头 ⇒ 整条线程软删、列表不再出现；
+- 迁移：旧库（无新列）打开后能补列且不丢数据。
+
+Node（`api.test.mjs` / `render.test.mjs`）：
+- `/api/observations` 返回**按线程聚合**的形状；
+- 渲染函数能处理新的版本字段。
+
+- [ ] **Step 7: 全量验收**
+
+```bash
+python -m unittest discover -s tests -t .
+node --test "miniapps/agaistock/test/*.test.mjs"
+cd miniapps\agaistock; node --test "test/*.test.mjs"        # 双 cwd 必测
+node --check miniapps\agaistock\miniapp\node\server.mjs
+node tools\check-spec.mjs docs\superpowers\plans\2026-11-24-reviewer-layer-and-chanlun-reviewer.md --external docs\superpowers\specs\2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md --external docs\superpowers\specs\2026-11-24-stock-review-app-architecture.md
+python tools\sync-kernel.py --check
+python tools\clean-package-artifacts.py --check
+```
+
+**实装验证**：重发布后，宿主真实库里对同一标的连记两条 ⇒
+观察库**只出现一行**、行上标「第 2 版」、点评面板能看到两轮点评、结算日**没有**被顺延。
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/agaistock miniapps/agaistock/src/agaistock miniapps/agaistock/miniapp miniapps/agaistock/test tests docs/superpowers
+git commit -m "feat: continue the observation thread for the same symbol" -- <同样的路径>
+```
+
+> **内核随包走**：`miniapps/agaistock/src/agaistock/**` 是源目录的逐字节副本，
+> **两处必须一起提交**（D23）。
+
+---
+---
+
 ## Appendix A: 常用命令速查
 
 ```bash
