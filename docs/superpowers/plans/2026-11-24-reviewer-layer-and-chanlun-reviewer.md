@@ -8655,10 +8655,12 @@ git commit -m "fix: guard the host data dir wiring and make the kernel env herme
 > **13 组全部被护栏捕获，且每组红的是护栏集合里的测试**（不是无关测试碰巧红）。
 > 实现时若测试名与本节写法一致，这套判据可直接复用。
 
-> ⚠️ **本小节已被 fix round 3/4 补充**：默认内核工厂、`start()` 局部 `dataDir`、
-> **argv `--db` 通道**三处盲区已补（见下面 `### Task 20 · fix round 3`
-> 与 `### Task 20 · fix round 4` 小节）——
+> ⚠️ **本小节已被 fix round 3/4/5 补充**：默认内核工厂、`start()` 局部 `dataDir`、
+> argv `--db` 通道（`handleRoute` 层）、**argv 拼接点（最后一公里）**四处盲区已补
+> （见下面 `### Task 20 · fix round 3` / `### fix round 4` / `### fix round 5` 小节）——
 > **别照着本小节 Step 2e 的默认实现写法实现**（它没把 `deps.spawnFn` 透传下去）。
+> **断言要落在 `runKernel` 的 `spawnFn` 边界** —— 那里抓到的 argv 就是进程实际收到的参数，
+> 任何上游层（`handleRoute`、默认内核工厂、`runKernel` 自身）的动手脚都躲不掉。
 
 **Minor 1（headline）：fix round 1 的源码断言只锚定「调用点字面量存在」，没有验证数据流。**
 

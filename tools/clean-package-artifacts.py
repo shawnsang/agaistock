@@ -4,8 +4,9 @@
 为什么需要它：`data/`（含 `agaistock.db`、`chanlun/`）是 gitignored 的运行产物，
 而**宿主会把 gitignored 产物一并拷进安装目录**（实测：仓库插件包
 `miniapps/agaistock/src/agaistock/**` 的 24 个 `.pyc` 与宿主持久安装目录
-`~/.minimax/plugins/agaistock/src/agaistock/**` 的 24 个 `.pyc` **mtime 24/24 完全相同**，
-其中 18 个还早于运行时解包时刻 ⇒ 那些是宿主拷进去的，不是运行时写的）。
+`~/.minimax/plugins/agaistock/src/agaistock/**` 的 24 个 `.pyc` **mtime 24/24 完全相同**；
+至于「有多少个早于运行时解包时刻」**随解包批次变化**（实测 19/24 ~ 24/24），
+**不要**把某个固定数字当证据 —— 决定性的是「mtime 逐个完全相同」这一条）。
 
 于是只要仓库里留下一个 `miniapps/agaistock/data/agaistock.db`，publish 就会把它带进安装产物：
 - 宿主侧读到的是**空库**（0 observations），而真实数据在 `context.dataDir` 的库里

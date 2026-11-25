@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -653,10 +653,11 @@ test('start() keeps the review draft in the host data dir', async () => {
     calls[0][idx + 1].startsWith(dataDir),
     `草稿必须落进宿主 dataDir，实际落在 ${calls[0][idx + 1]}`,
   );
-  assert.ok(
-    !existsSync(join(pluginRoot, 'observations.json')),
-    '观察卡绝不能落进插件目录',
-  );
+  // ⚠️ 不能只查 `observations.json` —— 草稿文件名是 `observation-*.json`（**单数**），
+  // 查复数那个文件**恒真**，草稿真落进插件目录也照样绿。
+  // 这里查**所有** observation 草稿文件（单数）。
+  const stray = readdirSync(pluginRoot).filter((name) => /^observation-.*\.json$/.test(name));
+  assert.deepEqual(stray, [], `草稿绝不能落进插件目录，实际有 ${JSON.stringify(stray)}`);
   await rm(base, { recursive: true, force: true });
 });
 
@@ -677,8 +678,12 @@ test('the kernel db path never falls back to the plugin dir', async () => {
   assert.ok(calls.length > 0, '内核必须被调用');
   const dbIdx = calls[0].indexOf('--db');
   assert.ok(dbIdx >= 0, '内核调用必须带 --db');
-  assert.ok(
-    !calls[0][dbIdx + 1].includes('agaistock'),
+  // ⚠️ 不能用 `!value.includes('agaistock')` —— 那依赖**仓库目录名恰好含该子串**，
+  // 换个路径名（安装副本、CI 的临时目录）这条就形同虚设。
+  // 判据是「**恰好等于插件根目录**才算回落」—— 与目录名无关。
+  assert.notEqual(
+    calls[0][dbIdx + 1],
+    join(import.meta.dirname, '..'),
     `没给 dbPath 时不许回落到插件目录，实际 ${calls[0][dbIdx + 1]}`,
   );
 });
@@ -725,3 +730,47 @@ test('the review draft follows the db path when no data dir is given', async () 
   }
 });
 
+
+// ---- argv 通道的最后一公里（fix round 5）----
+// 上一轮的六条断言的是**内核回调收到的 args**（handleRoute 那一层），
+// 而 Python 真正解析的 argv 是在 `runKernel` 里拼出来的 —— 那一层零护栏：
+// 在 runKernel 的 argv 末尾追加一个插件目录的 --db，67 条测试照样全绿，
+// 而 **argparse 对重复的 --db 取最后一个** ⇒ DB 真落进插件目录。
+//
+// 这里把断言落在**唯一产生 argv 的地方**（runKernel 的 spawnFn 边界）——
+// 抓到的 argv 就是进程实际收到的参数 ⇒ 任何上游层的动手脚都躲不掉。
+test('the kernel subprocess argv carries exactly the host db path', async () => {
+  const captured = [];
+  const fakeChild = {
+    stdout: { on() {} },
+    stderr: { on() {} },
+    kill() {},
+    on(event, handler) {
+      if (event === 'close') setImmediate(() => handler(0));
+    },
+  };
+  const hostDb = 'D:\\host\\data\\agaistock.db';
+  await runKernel(
+    ['list', '--db', hostDb, '--json'],
+    { dataDir: 'D:\\host\\data' },
+    'D:\\pkg',
+    (command, argv, options) => {
+      captured.push({ command, argv, env: options.env });
+      return fakeChild;
+    },
+  );
+  assert.equal(captured.length, 1);
+  // 收集 argv 里**所有** --db 的取值 —— 不能只看第一个：
+  // argparse 对重复的 --db 取**最后一个**，只看第一个会被绕过。
+  const dbValues = [];
+  captured[0].argv.forEach((value, index) => {
+    if (captured[0].argv[index - 1] === '--db') dbValues.push(value);
+  });
+  assert.deepEqual(
+    dbValues,
+    [hostDb],
+    `argv 里必须只有一个 --db 且是宿主给的路径，实际 ${JSON.stringify(dbValues)}`,
+  );
+  assert.equal(captured[0].env.AGAISTOCK_DB, hostDb);
+  assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
+});
