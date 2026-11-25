@@ -1,5 +1,7 @@
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 
 from agaistock.storage import db
 
@@ -230,6 +232,52 @@ class StorageTests(unittest.TestCase):
         second = [row["id"] for row in db.list_observations(conn)]
         self.assertEqual(first, second)
         self.assertEqual(first, ["obs_1", "obs_0"])
+
+
+class WriteTransactionTests(unittest.TestCase):
+    """写事务（Task 21 fix round 2）：「查续接 + 落库」必须整体串行化。"""
+
+    def test_write_transaction_excludes_a_second_writer(self):
+        # 写锁的**可观测**判据：持锁期间，另一个连接拿不到写锁。
+        # 没有这条，「查续接 + 落库」就没有任何串行化保证 ——
+        # 两个进程各自读到同一个 head ⇒ 同名不同代码被并进同一条线程。
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            conn = db.connect(db_path)
+            db.migrate(conn)
+            # 竞争者用**短超时**：拿不到锁就立刻报错，不要把测试拖成 30 秒。
+            other = sqlite3.connect(str(db_path), timeout=0.2)
+            try:
+                with db.write_transaction(conn):
+                    self.assertTrue(conn.in_transaction, "写事务必须真的开起来了")
+                    with self.assertRaises(sqlite3.OperationalError):
+                        other.execute("BEGIN IMMEDIATE")
+                # 事务正常退出 ⇒ 锁已释放 ⇒ 另一个连接能拿到。
+                other.execute("BEGIN IMMEDIATE")
+                other.rollback()
+            finally:
+                other.close()
+                conn.close()
+
+    def test_write_transaction_rolls_back_on_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            conn = db.connect(db_path)
+            db.migrate(conn)
+            try:
+                with self.assertRaises(RuntimeError):
+                    with db.write_transaction(conn):
+                        conn.execute(
+                            "INSERT INTO observations (id, symbol, created_at) "
+                            "VALUES ('obs_x', '002378', '2026-11-25T00:00:00+00:00')"
+                        )
+                        raise RuntimeError("boom")
+                rows = conn.execute(
+                    "SELECT * FROM observations WHERE id = 'obs_x'"
+                ).fetchall()
+                self.assertEqual(len(rows), 0, "写事务里出错必须回滚")
+            finally:
+                conn.close()
 
 
 class ObservationThreadTests(unittest.TestCase):

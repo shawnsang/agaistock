@@ -185,22 +185,29 @@ def cmd_review(args) -> int:
         )
         # 续接：同一标的的**最新存活版本** —— 新输入并进同一条线程，
         # 而不是新开一条互不相干的记录。
-        previous = (
-            None
-            if args.new_thread
-            else db.find_thread_head(
-                conn, observation.get("symbol", ""), observation.get("name", "")
+        #
+        # ⚠️ 「查续接 + 落库」必须整体在**写事务**里（Task 21 fix round 2）：
+        #    两个进程同时点评同一只标的时，各自读到同一个 head、
+        #    各自以为自己是下一版 ⇒ 同名不同代码的观察被并进同一条线程，
+        #    版本链还会分叉。`BEGIN IMMEDIATE` 在第一句 SELECT 之前就拿到写锁。
+        #    点评运行（LLM，耗时）在事务**之外** —— 写锁只覆盖毫秒级的查+写。
+        with db.write_transaction(conn):
+            previous = (
+                None
+                if args.new_thread
+                else db.find_thread_head(
+                    conn, observation.get("symbol", ""), observation.get("name", "")
+                )
             )
-        )
-        if previous:
-            observation = continuation.merge_into_previous(previous, observation)
-        thread_id = (previous.get("thread_id") or previous["id"]) if previous else None
-        observation_id = db.insert_observation(
-            conn,
-            observation,
-            supersedes_id=previous["id"] if previous else None,
-            thread_id=thread_id,
-        )
+            if previous:
+                observation = continuation.merge_into_previous(previous, observation)
+            thread_id = (previous.get("thread_id") or previous["id"]) if previous else None
+            observation_id = db.insert_observation(
+                conn,
+                observation,
+                supersedes_id=previous["id"] if previous else None,
+                thread_id=thread_id,
+            )
         thread_id = thread_id or observation_id
 
         reviewers = registry.load_reviewers()

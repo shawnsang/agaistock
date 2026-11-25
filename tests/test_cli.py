@@ -1,11 +1,15 @@
 import json
 import os
+import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from agaistock import cli
+from agaistock.storage import db
 
 
 class CliTests(unittest.TestCase):
@@ -499,6 +503,116 @@ class ContinuationCliTests(unittest.TestCase):
             ], db_path)
             self.assertEqual(first["thread_id"], second["thread_id"])
             self.assertEqual(second["version"], 2)
+
+
+class ConcurrentContinuationTests(unittest.TestCase):
+    """并发续接（Task 21 fix round 2）：两个进程同时点评同一只标的。
+
+    复审 Minor-1：name→symbol 回落把「同名不同 symbol」的**并发**写入并进同一线程；
+    更一般地，「查续接 + 落库」之间没有写锁 ⇒ 版本链会**分叉**。
+    """
+
+    def _setup(self, tmp):
+        db_path = Path(tmp) / "a.db"
+        draft = Path(tmp) / "draft.json"
+        draft.write_text(json.dumps({
+            "symbol": "002378", "name": "章源钨业", "direction": "bullish",
+            "confidence": 0.7, "thesis": "钨价上涨",
+        }, ensure_ascii=False), encoding="utf-8")
+        # 预置第一版：把线程起点固定住。
+        conn = db.connect(db_path)
+        db.migrate(conn)
+        root_id = db.insert_observation(conn, {
+            "symbol": "002378", "name": "章源钨业", "direction": "bullish",
+            "thesis": "钨价上涨", "confidence": 0.7,
+        })
+        conn.close()
+        argv = [
+            "review", "--symbol", "002378", "--name", "章源钨业",
+            "--text", "补充一句", "--observation-file", str(draft),
+            "--db", str(db_path), "--json",
+        ]
+        return db_path, root_id, argv
+
+    def _versions(self, db_path, root_id):
+        conn = db.connect(db_path)
+        try:
+            return db.thread_versions(conn, root_id)
+        finally:
+            conn.close()
+
+    def test_continuation_lookup_runs_under_the_write_lock(self):
+        """「查续接」这一步必须**已经在写事务里**（不是查完才加锁）。
+
+        判据：在续接查询执行的那一刻，另开一个连接尝试拿写锁 ⇒ 必须被拒。
+        没有写锁时这一步会成功 ⇒ 第二个进程能同时读到同一个 head。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path, _root_id, argv = self._setup(tmp)
+            seen = {}
+            original = db.find_thread_head
+
+            def probe(conn, symbol, name=""):
+                contender = sqlite3.connect(str(db_path), timeout=0.2)
+                try:
+                    contender.execute("BEGIN IMMEDIATE")
+                except sqlite3.OperationalError as error:
+                    seen["blocked"] = str(error)
+                else:
+                    seen["blocked"] = ""
+                    contender.rollback()
+                finally:
+                    contender.close()
+                return original(conn, symbol, name)
+
+            with mock.patch.object(cli.registry, "load_reviewers", return_value=[]), \
+                 mock.patch.object(db, "find_thread_head", side_effect=probe), \
+                 mock.patch("builtins.print"):
+                cli.main(argv)
+            self.assertIn("locked", seen.get("blocked", ""),
+                          "查续接时必须已经持有写锁（否则并发会各读各的 head）")
+
+    def test_concurrent_reviews_do_not_fork_the_version_chain(self):
+        """两个线程同时点评 ⇒ 版本链必须是一条直线，不许分叉。
+
+        没有写锁时：两个线程各自读到同一个 head（v1）⇒ 各自插入一条版本行，
+        两条的 `supersedes_id` 都是 v1 ⇒ 链条分叉（一个 head 两个后继）。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path, root_id, argv = self._setup(tmp)
+            original = db.find_thread_head
+
+            def slow_find(conn, symbol, name=""):
+                head = original(conn, symbol, name)
+                # 让两个线程的「读 head」重叠 —— 没有写锁时它们会读到同一个 head。
+                time.sleep(0.3)
+                return head
+
+            def worker():
+                cli.main(argv)
+
+            with mock.patch.object(cli.registry, "load_reviewers", return_value=[]), \
+                 mock.patch.object(db, "find_thread_head", side_effect=slow_find), \
+                 mock.patch("builtins.print"):
+                threads = [threading.Thread(target=worker) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(60)
+                    self.assertFalse(thread.is_alive(), "并发评审必须结束")
+
+            versions = self._versions(db_path, root_id)
+            self.assertEqual(len(versions), 3, "两个并发版本 + 第一版 = 三个版本行")
+            children = {}
+            for row in versions:
+                children.setdefault(row.get("supersedes_id"), []).append(row["id"])
+            self.assertEqual(len(children.get(None, [])), 1, "必须只有一个根版本")
+            root = children[None][0]
+            self.assertEqual(len(children.get(root, [])), 1,
+                             "根版本只能有一个后继（两个后继 = 版本链分叉了）")
+            second = children[root][0]
+            self.assertEqual(len(children.get(second, [])), 1,
+                             "第二个版本只能有一个后继（版本链分叉了）")
 
 
 if __name__ == "__main__":

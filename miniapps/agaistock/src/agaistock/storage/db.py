@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import uuid
@@ -78,10 +79,40 @@ def _new_id(prefix: str) -> str:
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path))
+    # ⚠️ `timeout=30`：写锁竞争时最多等 30 秒。默认 5 秒太短 ——
+    # 两个进程同时点评同一只标的时，第二个会等第一个的写事务结束；
+    # 5 秒一过就抛 `database is locked`，用户看到的是「保存失败」。
+    conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
+
+
+@contextlib.contextmanager
+def write_transaction(conn: sqlite3.Connection):
+    """SQLite **写事务**：在第一句 SELECT 之前就拿到写锁。
+
+    「查续接 + 落库」必须整体串行化：两个进程各自读到同一个 head，
+    各自以为自己是下一版 ⇒ 同名不同代码的观察被并进同一条线程，
+    版本链还会分叉（Task 21 fix round 2）。
+
+    ⚠️ 必须是 `BEGIN IMMEDIATE`（**立即**拿写锁）：延迟事务（`BEGIN`）
+    要到第一次写才拿锁 ⇒ 两个进程仍然能各自读到同一个 head。
+    """
+    if conn.in_transaction:
+        # 已经在事务里（调用方自己开的）⇒ 不重复 begin，直接用外层那个。
+        yield conn
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        if conn.in_transaction:
+            conn.commit()
 
 
 def migrate(conn: sqlite3.Connection) -> None:

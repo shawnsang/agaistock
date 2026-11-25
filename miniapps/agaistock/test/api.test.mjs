@@ -2,10 +2,18 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 
-import { handleRoute, buildKernelEnv, kernelDbPath, runKernel, start } from '../miniapp/node/server.mjs';
+import {
+  handleRoute,
+  buildKernelEnv,
+  isPathInside,
+  kernelDbPath,
+  normalizePathSpelling,
+  runKernel,
+  start,
+} from '../miniapp/node/server.mjs';
 
 function makeRequest(method, url, body) {
   return {
@@ -831,16 +839,84 @@ test('the kernel db path never falls back to the plugin dir', async () => {
   const value = dbValues[0];
   if (value) {
     const target = resolve(value);
-    // ⚠️ 插件根的比较必须**大小写不敏感**：Windows 上路径大小写不敏感，
-    // `PLUGIN_ROOT.toUpperCase()` 与插件根指的是**同一个目录** ——
-    // 大小写敏感的「等于插件根」会让这条变体整个溜过去
-    // （fix round 8 复审 M1；控制器已独立复现：改前 79/79 全绿 = 漏过）。
-    const root = pluginRoot.toLowerCase();
-    const low = target.toLowerCase();
+    // ⚠️ 判据必须**拼写归一化**后再按路径语义比较（fix round 10 复审 Minor-2）：
+    //    同一个目录在 Windows 上有多种写法 ——
+    //    `\\?\D:\...`（扩展长度前缀）、`\\?\UNC\localhost\D$\...`、
+    //    `\\localhost\D$\...`（回环管理共享）—— 裸字符串前缀比较**全部对不上**，
+    //    这些变体都能从判据下溜过去。`isPathInside` 是**生产代码**里的归一化判定。
     assert.ok(
-      low !== root && !low.startsWith(root + sep),
+      !isPathInside(pluginRoot, target),
       `没给 dbPath 时不许回落到插件目录，实际 ${value}`,
     );
+  }
+});
+
+test('the plugin-root guard recognizes every spelling of the plugin root', () => {
+  // fix round 10 复审 Minor-2：**同一个目录**在 Windows 上有好几种写法，
+  // 裸字符串前缀比较全都对不上 —— 这些变体都能从「不许落插件目录」的判据下溜过去。
+  //
+  // 判据本身是**生产代码**（`isPathInside` / `normalizePathSpelling`），
+  // 这里只是它的消费者：变异探针把归一化改坏 ⇒ 这条必须红。
+  const root = resolve(join(import.meta.dirname, '..'));
+  const spellings = [root, root.toUpperCase()];
+  if (process.platform === 'win32') {
+    const drive = root[0];
+    const rest = root.slice(2);
+    // 扩展长度前缀 / 扩展长度+UNC / 回环管理共享（两种主机名写法）
+    spellings.push(
+      `\\\\?\\${root}`,
+      `\\\\?\\UNC\\localhost\\${drive}$${rest}`,
+      `\\\\localhost\\${drive}$${rest}`,
+      `\\\\127.0.0.1\\${drive}$${rest}`,
+    );
+  }
+  for (const spelling of spellings) {
+    assert.ok(
+      isPathInside(root, spelling),
+      `判据必须认得插件根的这一种写法：${spelling}`,
+    );
+    assert.ok(
+      isPathInside(root, join(spelling, 'agaistock.db')),
+      `判据必须认得插件根**下面**的文件的这一种写法：${spelling}`,
+    );
+  }
+  // 插件根**外面**的路径必须判为不在里面（否则护栏就成了一律拦）。
+  assert.equal(
+    isPathInside(root, resolve(join(root, '..', 'elsewhere', 'agaistock.db'))),
+    false,
+    '插件根外面的路径必须判为不在里面',
+  );
+  assert.equal(
+    isPathInside(root, resolve(join(root, '..'))),
+    false,
+    '插件根的上一级必须判为不在里面',
+  );
+});
+
+test('start() refuses to run when the kernel database would land in the plugin dir', async () => {
+  // 护栏不能只是「测试里的约定」—— 插件目录是**安装产物**（重装会被覆盖，也可能只读），
+  // 把运行数据写进去正是 Task 20 要消灭的事。⇒ `start()` 必须**当场拒绝**。
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const listen = { port: 0, host: '127.0.0.1' };
+  const signal = new AbortController().signal;
+  const kernel = { createKernel: () => async () => ({ code: 0, stdout: '{"items":[]}', stderr: '' }) };
+  try {
+    // ① dataDir 缺失 ⇒ dbPath 为空 ⇒ 内核会回落到 `<插件根>/data/agaistock.db`
+    await assert.rejects(
+      () => start({ pluginRoot, listen, signal }, kernel),
+      /context\.dataDir/,
+      '宿主没给 dataDir 时必须拒绝启动（内核默认值落在插件目录里）',
+    );
+    // ② dataDir 在插件根**之内** ⇒ 数据库会落进安装目录 ⇒ 同样必须拒绝
+    const inside = join(pluginRoot, 'data');
+    await mkdir(inside, { recursive: true });
+    await assert.rejects(
+      () => start({ dataDir: inside, pluginRoot, listen, signal }, kernel),
+      /context\.dataDir/,
+      'dataDir 在插件目录之内时必须拒绝启动',
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
   }
 });
 

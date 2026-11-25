@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative, isAbsolute } from 'node:path';
 
 const OBSERVATIONS_FILE = 'observations.json';
 
@@ -114,6 +114,70 @@ const KERNEL_TIMEOUT_MS = 180000;
  */
 export function kernelDbPath(context = {}) {
   return context.dataDir ? join(context.dataDir, 'agaistock.db') : '';
+}
+
+// Windows 的扩展长度前缀（`\\?\`）与 UNC 前缀。
+// ⚠️ 这两个常量是**字面量**：`\\?\` 在普通字符串里要写成 `'\\\\?\\'`。
+const EXTENDED_UNC_PREFIX = '\\\\?\\UNC\\';
+const EXTENDED_PREFIX = '\\\\?\\';
+const LOOPBACK_HOSTS = ['\\\\localhost\\', '\\\\127.0.0.1\\'];
+
+/**
+ * 归一化 Windows 路径的**拼写变体** —— 同一个目录有好几种写法，
+ * 裸字符串比较全都对不上（fix round 10 复审 Minor-2）：
+ *
+ * | 写法 | 实际指向 |
+ * |---|---|
+ * | `C:\p` | 盘符路径 |
+ * | `\\?\C:\p` | 扩展长度前缀 —— 同一目录 |
+ * | `\\?\UNC\host\share\p` | 扩展长度 + UNC —— 同一目录 |
+ * | `\\localhost\C$\p` | 回环管理共享 —— 同一目录 |
+ *
+ * ⇒ 护栏必须**先归一化拼写、再按路径语义比较**，
+ * 否则这些变体都能从「不许落插件目录」的判据下溜过去。
+ */
+export function normalizePathSpelling(value) {
+  let text = String(value ?? '');
+  if (text.toUpperCase().startsWith(EXTENDED_UNC_PREFIX.toUpperCase())) {
+    // `\\?\UNC\host\share\p` ⇒ `\\host\share\p`
+    text = '\\\\' + text.slice(EXTENDED_UNC_PREFIX.length);
+  } else if (text.startsWith(EXTENDED_PREFIX)) {
+    // `\\?\C:\p` ⇒ `C:\p`
+    text = text.slice(EXTENDED_PREFIX.length);
+  }
+  for (const host of LOOPBACK_HOSTS) {
+    if (!text.toLowerCase().startsWith(host.toLowerCase())) continue;
+    const rest = text.slice(host.length);
+    const slash = rest.indexOf('\\');
+    const share = slash === -1 ? rest : rest.slice(0, slash);
+    // `C$` ⇒ 盘符 C 的管理共享 ⇒ 映射回 `C:\...`
+    if (share.length === 2 && share.endsWith('$')) {
+      text = `${share[0]}:${slash === -1 ? '\\' : rest.slice(slash)}`;
+    }
+    break;
+  }
+  return text;
+}
+
+/**
+ * `candidate` 是不是在 `root` **之内**（含等于 root 自己）。
+ *
+ * 用 `relative()` 做**路径语义**比较：
+ *  - `rel === ''` ⇒ 同一个路径；
+ *  - `rel` 是绝对路径 ⇒ 不同的盘/根 ⇒ 不在里面；
+ *  - `rel` 里有 `..` ⇒ 在外面。
+ *
+ * ⚠️ `path.win32.relative` 本身**大小写不敏感** ⇒ 顺带覆盖 fix round 9 的 M1
+ * （`PLUGIN_ROOT.toUpperCase()` 与插件根是同一个目录）。
+ */
+export function isPathInside(root, candidate) {
+  const base = normalizePathSpelling(root);
+  const target = normalizePathSpelling(candidate);
+  if (!base || !target) return false;
+  const rel = relative(base, target);
+  if (rel === '') return true;
+  if (isAbsolute(rel)) return false;
+  return !rel.split(/[\\/]+/).includes('..');
 }
 
 /**
@@ -424,10 +488,26 @@ export async function start(context, deps = {}) {
   // 局部 dataDir 与 context.dataDir **必须是同一个**（下面那两条行为断言在守这件事）：
   // 它决定 observations.json 落哪，也决定内核的运行路径。
   const dataDir = context.dataDir;
-  await mkdir(dataDir, { recursive: true });
-  const observationsPath = join(dataDir, OBSERVATIONS_FILE);
   // 宿主给的 pluginRoot 才是权威；模块层级的推导只是兜底。
   const pluginRoot = context.pluginRoot || PLUGIN_ROOT;
+
+  // **运行时硬约束**（fix round 10）：不许把内核数据库放进插件目录。
+  // 插件根是安装产物 —— 重装会被覆盖，也可能只读。
+  // ⚠️ `dbPath` 为空同样要拦：内核的**默认值**是 `<插件根>/data/agaistock.db`
+  //    （`cli._default_db()` → `config.repo_root()/DEFAULT_DB`）—— 也在插件根里。
+  //    宿主必须给 `context.dataDir`。
+  // ⚠️ 这条检查必须**早于** mkdir(dataDir)：dataDir 缺失时 mkdir 会先抛
+  //    一个语焉不详的 ERR_INVALID_ARG_TYPE，把真正的原因盖掉。
+  const dbPath = kernelDbPath(context);
+  if (!dbPath || isPathInside(pluginRoot, dbPath)) {
+    throw new Error(
+      `宿主必须提供 context.dataDir：内核数据库不能落进插件目录（插件根 ${pluginRoot}，`
+      + `算出的 dbPath ${dbPath || '(空)'}）`,
+    );
+  }
+
+  await mkdir(dataDir, { recursive: true });
+  const observationsPath = join(dataDir, OBSERVATIONS_FILE);
   const clientEntry = await readFile(join(pluginRoot, 'miniapp/client/index.html'));
 
   // Task 15 把渲染逻辑拆到 render.mjs，页面用 <script type="module" src="./render.mjs"> 引入。
@@ -505,8 +585,8 @@ export async function start(context, deps = {}) {
   // 运行数据落宿主给的数据目录，**不是**插件目录 ——
   // 插件目录是安装产物（可能被只读安装、也可能被 Host 重装覆盖），
   // dataDir 才是运行时可写、跨重启保留的数据位置。
-  // 数据库路径由 kernelDbPath 一处说了算（不再有可被覆写的中间对象）。
-  const dbPath = kernelDbPath(context);
+  // 数据库路径由 kernelDbPath 一处说了算（不再有可被覆写的中间对象），
+  // 且已在函数开头用 `isPathInside` 硬约束过「不许落进插件根」。
 
   // 内核工厂可注入：测试要能观测 start() 到底把什么递给了内核。
   // 默认实现把**宿主的 context 原样**传给 runKernel，并把 `deps.spawnFn` 透传下去 ——
