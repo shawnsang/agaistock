@@ -499,22 +499,39 @@ test('the default kernel factory hands the host context to the kernel unchanged'
     captured.length >= routes.length,
     `生产路径必须每条路由都 spawn 了内核，实际 ${captured.length} 次`,
   );
-  assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, dataDir);
-  assert.equal(captured[0].env.AGAISTOCK_DB, join(dataDir, 'agaistock.db'));
-  assert.equal(captured[0].env.PYTHONPATH, join(pluginRoot, 'src'));
-  assert.equal(captured[0].cwd, pluginRoot);
-  // ⚠️ **argv 也要断言** —— Python 侧 `_default_db()` 是 **argv 优先于 env**
-  //（src/agaistock/cli.py:26-32）⇒ env 对了不代表 DB 落点对。
-  // 这里是**默认内核工厂**这条路径（宿主不传 deps 时走的就是它），
-  // 所以工厂往 args 里塞/改写 `--db` 也必须被抓到。
-  //
-  // ⚠️ **每一次 spawn 都要断言**，不能只看 `captured[0]` ——
+  // ⚠️ **每一次 spawn 都要断言 env / cwd**，不能只看 `captured[0]` ——
   // 路由分派型变异（只对某条路由动手脚）对第一条路由完全不可见。
-  //
-  // ⚠️ 收集方式必须**按 argparse 的语义**：`--db VALUE` / `--db=VALUE` /
-  // `--d VALUE` / `--d=VALUE` 四种写法等价，且重复出现取最后一个。
+  // env 通道同样如此：Python 侧 `_default_db()` 是 **argv 优先于 env**，
+  // 但 env 本身就是一条独立的落点通道，两条都要钉住。
   const expectedDb = join(dataDir, 'agaistock.db');
   captured.forEach((call, index) => {
+    assert.equal(
+      call.env.AGAISTOCK_DATA_DIR,
+      dataDir,
+      `第 ${index + 1} 次 spawn 的 AGAISTOCK_DATA_DIR 必须是宿主给的目录`,
+    );
+    assert.equal(
+      call.env.AGAISTOCK_DB,
+      expectedDb,
+      `第 ${index + 1} 次 spawn 的 AGAISTOCK_DB 必须是宿主给的路径`,
+    );
+    assert.equal(
+      call.env.PYTHONPATH,
+      join(pluginRoot, 'src'),
+      `第 ${index + 1} 次 spawn 的 PYTHONPATH 必须指向插件包自带的内核`,
+    );
+    assert.equal(
+      call.cwd,
+      pluginRoot,
+      `第 ${index + 1} 次 spawn 的 cwd 必须是插件根`,
+    );
+    // ⚠️ **argv 也要断言** —— Python 侧 `_default_db()` 是 **argv 优先于 env**
+    //（src/agaistock/cli.py:26-32）⇒ env 对了不代表 DB 落点对。
+    // 这里是**默认内核工厂**这条路径（宿主不传 deps 时走的就是它），
+    // 所以工厂往 args 里塞/改写 `--db` 也必须被抓到。
+    //
+    // ⚠️ 收集方式必须**按 argparse 的语义**：`--db VALUE` / `--db=VALUE` /
+    // `--d VALUE` / `--d=VALUE` 四种写法等价，且重复出现取最后一个。
     const dbValues = collectDbValues(call.argv);
     assert.deepEqual(
       dbValues,
@@ -676,11 +693,13 @@ test('start() gives the host data dir to every kernel call', async () => {
   }
   assert.ok(calls.length > 0, '内核必须真的被调用');
   for (const args of calls) {
-    const dbIdx = args.indexOf('--db');
-    assert.ok(dbIdx >= 0, `内核调用必须带 --db：${JSON.stringify(args)}`);
-    assert.equal(
-      args[dbIdx + 1],
-      join(dataDir, 'agaistock.db'),
+    // ⚠️ 收集方式必须**按 argparse 的语义** —— `--db VALUE` / `--db=VALUE` /
+    // `--d VALUE` / `--d=VALUE` 四种写法等价。只用 `indexOf('--db')` 的话，
+    // 内联与缩写形态整个看不见（fix round 7 的 Important 1）。
+    const dbValues = collectDbValues(args);
+    assert.deepEqual(
+      dbValues,
+      [join(dataDir, 'agaistock.db')],
       `--db 必须是宿主给的数据库路径：${JSON.stringify(args)}`,
     );
   }
@@ -756,16 +775,24 @@ test('the kernel db path never falls back to the plugin dir', async () => {
   // （那才是内核真正会写的那个文件）。
   // ⚠️ 必须**归一化**再比：`/` 分隔与大小写差异在 Windows 上都指向同一个目录，
   // 裸 `startsWith` 会漏掉这两种拼写（fix round 7 的 Minor 1）。
+  // ⚠️⚠️ **空 dbPath 不是路径** —— 不能拿 `resolve()` 把它解析成 **cwd**！
+  //    cwd 恰好等于插件根时（`cd miniapps/agaistock && node --test` 就是这个情形）
+  //    这条会**假失败** —— fix round 7 引入的回归，被 fix round 8 的复审用
+  //    「cwd = 包自己」的中性路径抓出来。
+  //    空值本身是对的：`handleRoute` 传 `--db ''`，内核 `_default_db()` 看到空串
+  //    会回落到 env 通道（宿主给的路径），env 通道另有断言。
   const pluginRoot = resolve(join(import.meta.dirname, '..'));
   const dbValues = collectDbValues(calls[0]);
   assert.ok(dbValues.length > 0, '内核调用必须带 --db');
   const value = dbValues[0];
-  const target = resolve(value || '.');
-  assert.ok(
-    target !== pluginRoot
-      && !target.toLowerCase().startsWith(pluginRoot.toLowerCase() + sep),
-    `没给 dbPath 时不许回落到插件目录，实际 ${value}`,
-  );
+  if (value) {
+    const target = resolve(value);
+    assert.ok(
+      target !== pluginRoot
+        && !target.toLowerCase().startsWith(pluginRoot.toLowerCase() + sep),
+      `没给 dbPath 时不许回落到插件目录，实际 ${value}`,
+    );
+  }
 });
 
 test('the review draft follows the db path when no data dir is given', async () => {
