@@ -9913,6 +9913,244 @@ git commit -m "test: pin the kernel argv channel and make the evidence reproduci
 
 ---
 
+### Task 20 · fix round 5 — 把断言落到**唯一产生 argv 的地方**（最后一公里）
+
+> **来源**：Task 20 fix round 3/4 的 scoped 复审（verifier）—— fix round 4 是
+> **PASS-WITH-MINORS**，0 Critical，但有 **1 条 Important + 2 条 Minor + 3 条 Nit**。
+> 控制器已**独立复现**（自己的变异脚本 + 真实跑 Python 内核 + 中性路径对照），
+> 结论与评审方一致。
+
+**fix round 4 的那 6 条测试确实落地了** —— 评审方用**自写**脚本独立复现「先红后绿」：
+对着修复前 9 组 argv 通道变异**全部漏过**、对着修复后**全部转为捕获**，
+端到端探针（只换 `spawn`，真调 `start(context)` **不传 deps**）实测
+`cwd`/`PYTHONPATH`/`AGAISTOCK_*`/`--db` **全部指向宿主给的值** ⇒ **实现本身正确，无功能缺陷**。
+
+---
+
+**Important 1（headline）：argv 通道只钉到 `handleRoute` 那一层，最后一公里零护栏。**
+
+fix round 4 的六条断言验的都是**内核回调收到的 args**（`handleRoute` 那一层）；
+而 Python 真正解析的 argv 是在 **`runKernel` 里拼出来**的（`server.mjs:166`）——
+**那一层没有任何护栏**。
+
+控制器**独立复现**：
+
+```
+[D1] runKernel 在 argv 末尾追加一个插件目录的 --db   → exit 0 漏过（67 条全绿）
+[E1] runKernel 追加一个**重复**的 --db              → exit 0 漏过
+```
+
+并用**真实 Python 内核**证实危害（`argparse` 对重复 `--db` 取**最后一个**）：
+
+```
+argv: --db <host>\agaistock.db  --db <plugin>\agaistock.db
+→ 宿主目录里有 db = False
+→ 插件目录里有 db = True     ← DB 真落进插件目录，而 67 条测试全绿
+```
+
+⇒ **env 绿 ≠ argv 绿 ≠ DB 落点对。**
+
+**根因（与 fix round 1/2/3/4 同构，只是又下沉了一层）**：
+被观测的对象（`handleRoute` 的 args）≠ 实际生效的对象（进程实际收到的 argv）。
+
+**Minor 1**：新护栏判据 `!value.includes('agaistock')` **依赖仓库目录名恰好含该子串**。
+控制器实测：把代码复制到不含该子串的目录（`pkg-neutral-x1y2z`）后，同一变异就漏过。
+
+**Minor 2**：`api.test.mjs` 里查的是 `observations.json`，而草稿文件名是
+`observation-*.json`（**单数**）⇒ **该断言恒真**；草稿真写进插件目录仍全绿。
+
+**Nit 1**：控制器那份变异脚本的 argv 通道变异**全部停在 `handleRoute` 层**，
+没有一组打真实 argv 拼接点或默认工厂 ⇒ 这正是 Important 1 溜过去的原因。
+**Nit 2**：`tools/clean-package-artifacts.py` 的 docstring 里还有**第 5 处**「18 个」活文本没被订正。
+**Nit 3**：新测试名与断言方向相反（`never falls back to the plugin dir` 里用的是「不许包含某子串」）。
+
+---
+
+**修法：把断言落到 `runKernel` 的 `spawnFn` 边界 —— 那里抓到的 argv 就是进程实际收到的参数。**
+
+这是**终态**：`runKernel` 是**唯一**产生 argv 的地方，
+任何上游层（`handleRoute`、默认内核工厂、`runKernel` 自身）的动手脚都躲不掉。
+
+- 新增一条测试：用 fake `spawnFn` 调 `runKernel`，断言 **argv 里所有 `--db` 的取值
+  恰好等于宿主给的 dbPath**（**收集全部** `--db`，不能只看第一个 —— `argparse` 取最后一个）。
+- 修 Minor 1：把「不许包含某子串」改成「**恰好等于插件根目录**才算回落」—— 与目录名无关。
+- 修 Minor 2：查**所有** `observation-*.json`（单数）草稿文件，而不是 `observations.json`。
+- 修 Nit 2：`tools/clean-package-artifacts.py` docstring 里第 5 处「18 个」。
+
+**Files:**
+- Modify: `miniapps/agaistock/test/api.test.mjs`
+- Modify: `tools/clean-package-artifacts.py`
+- Modify: `docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md`
+- Modify: `docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md`
+
+> ⚠️ **本轮不改 `server.mjs`** —— 评审方确认实现本身**正确**
+> （端到端探针实测未改动实现上所有路径参数都对）。这一轮是**把护栏钉到终态**。
+
+**Interfaces:**
+- Consumes: 无（只加测试 + 修判据 + 文档）
+- Produces: 无（对外契约不变）
+
+- [ ] **Step 1: 加一条测试 + 修两处判据（`api.test.mjs`）**
+
+**1a) 顶部 import 补 `readdirSync`**：
+
+```javascript
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+```
+
+**1b) 修 Minor 1 的判据**（`the kernel db path never falls back to the plugin dir`）：
+
+```javascript
+  // ⚠️ 不能用 `!value.includes('agaistock')` —— 那依赖**仓库目录名恰好含该子串**，
+  // 换个路径名（安装副本、CI 的临时目录）这条就形同虚设。
+  // 判据是「**恰好等于插件根目录**才算回落」—— 与目录名无关。
+  assert.notEqual(
+    calls[0][dbIdx + 1],
+    join(import.meta.dirname, '..'),
+    `没给 dbPath 时不许回落到插件目录，实际 ${calls[0][dbIdx + 1]}`,
+  );
+```
+
+> `join(import.meta.dirname, '..')` = `miniapps/agaistock` = 插件根
+> （测试文件在 `miniapps/agaistock/test/`，`server.mjs` 的模块常量 `PLUGIN_ROOT`
+> 也是这个值 —— 但 `PLUGIN_ROOT` **不是** export，测试文件拿不到，所以用相对路径算）。
+
+**1c) 修 Minor 2 的恒真断言**（`start() keeps the review draft in the host data dir`）：
+
+```javascript
+  // ⚠️ 不能只查 `observations.json` —— 草稿文件名是 `observation-*.json`（**单数**），
+  // 查复数那个文件**恒真**，草稿真落进插件目录也照样绿。
+  // 这里查**所有** observation 草稿文件（单数）。
+  const stray = readdirSync(pluginRoot).filter((name) => /^observation-.*\.json$/.test(name));
+  assert.deepEqual(stray, [], `草稿绝不能落进插件目录，实际有 ${JSON.stringify(stray)}`);
+```
+
+> 替换掉原来的 `assert.ok(!existsSync(join(pluginRoot, 'observations.json')), ...)`。
+
+**1d) 追加一条「最后一公里」测试**（文件末尾）：
+
+```javascript
+// ---- argv 通道的最后一公里（fix round 5）----
+// 上一轮的六条断言的是**内核回调收到的 args**（handleRoute 那一层），
+// 而 Python 真正解析的 argv 是在 `runKernel` 里拼出来的 —— 那一层零护栏：
+// 在 runKernel 的 argv 末尾追加一个插件目录的 --db，67 条测试照样全绿，
+// 而 **argparse 对重复的 --db 取最后一个** ⇒ DB 真落进插件目录。
+//
+// 这里把断言落在**唯一产生 argv 的地方**（runKernel 的 spawnFn 边界）——
+// 抓到的 argv 就是进程实际收到的参数 ⇒ 任何上游层的动手脚都躲不掉。
+test('the kernel subprocess argv carries exactly the host db path', async () => {
+  const captured = [];
+  const fakeChild = {
+    stdout: { on() {} },
+    stderr: { on() {} },
+    kill() {},
+    on(event, handler) {
+      if (event === 'close') setImmediate(() => handler(0));
+    },
+  };
+  const hostDb = 'D:\\host\\data\\agaistock.db';
+  await runKernel(
+    ['list', '--db', hostDb, '--json'],
+    { dataDir: 'D:\\host\\data' },
+    'D:\\pkg',
+    (command, argv, options) => {
+      captured.push({ command, argv, env: options.env });
+      return fakeChild;
+    },
+  );
+  assert.equal(captured.length, 1);
+  // 收集 argv 里**所有** --db 的取值 —— 不能只看第一个：
+  // argparse 对重复的 --db 取**最后一个**，只看第一个会被绕过。
+  const dbValues = [];
+  captured[0].argv.forEach((value, index) => {
+    if (captured[0].argv[index - 1] === '--db') dbValues.push(value);
+  });
+  assert.deepEqual(
+    dbValues,
+    [hostDb],
+    `argv 里必须只有一个 --db 且是宿主给的路径，实际 ${JSON.stringify(dbValues)}`,
+  );
+  assert.equal(captured[0].env.AGAISTOCK_DB, hostDb);
+  assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, 'D:\\host\\data');
+});
+```
+
+> `runKernel` / `fakeChild` 的用法与已有的
+> `the kernel subprocess actually receives the host data dir` 一致，**不用**再加 import。
+
+- [ ] **Step 2: 修 `tools/clean-package-artifacts.py` 的第 5 处「18 个」**（Nit 2）
+
+docstring 里那句「（实测 `.pyc` mtime 24/24 相同、18 个早于解包时刻）」→ 改成：
+
+```
+而**宿主会把 gitignored 产物一并拷进安装目录**（实测仓库插件包
+`miniapps/agaistock/src/agaistock/**` 与宿主持久安装目录
+`~/.minimax/plugins/agaistock/src/agaistock/**` 的同名 24 个 `.pyc` **mtime 24/24 完全相同**；
+至于「有多少个早于解包时刻」**随解包批次变化**，**不要**把某个固定数字当证据）。
+```
+
+- [ ] **Step 3: 文档订正**
+
+1. **计划 fix round 2 小节**顶部的横幅：从「**三处**盲区已补」改成
+   「**四处**盲区已补（默认内核工厂 / `start()` 局部 `dataDir` / argv `--db` 通道 /
+   **argv 拼接点（最后一公里）**）」，并加一句「**别照着本小节 Step 2e 的默认实现写法实现**」
+   （已有）＋「**断言要落在 `runKernel` 的 `spawnFn` 边界**」。
+2. **设计文档 §16.4**：那条「三层行为护栏」改成「**四层**行为护栏」并列出：
+   env 纯函数 / 真实 spawn 路径 / `start()` 注入点 / 默认内核工厂 /
+   **argv 拼接点（`runKernel` 的 `spawnFn` 边界）**。
+   同时把「**能挡住本仓库内已被护栏覆盖到的改动**」的措辞保持**诚实**
+   （未覆盖的路径仍无护栏）。
+
+- [ ] **Step 4: 跑全量测试 + 加固后的变异脚本**
+
+```bash
+python -m unittest discover -s tests -t .
+node --test "miniapps/agaistock/test/*.test.mjs"
+node --check miniapps/agaistock/miniapp/node/server.mjs
+node tools\check-spec.mjs docs\superpowers\plans\2026-11-24-reviewer-layer-and-chanlun-reviewer.md --external docs\superpowers\specs\2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md --external docs\superpowers\specs\2026-11-24-stock-review-app-architecture.md
+```
+
+**封闭性验证（必做）**：
+
+```bash
+$env:AGAISTOCK_DATA_DIR='D:\ambient\host\data'; node --test "miniapps/agaistock/test/*.test.mjs"
+```
+
+预期**全绿**。
+
+**中性路径验证（必做 —— 这是 Minor 1 的直接反例）**：
+把 `miniapps/agaistock/` 复制到一个**不含 `agaistock` 子串**的目录（如
+`%TEMP%\pkg-neutral-x1y2z`），在那份副本里跑测试 —— 必须**仍然全绿**
+（修完后判据与目录名无关；修前那份副本上 R5 变异会漏过）。
+
+**变异验证（必做）**：控制器会提供 `.tmp\task20-fix5\mutations.py`，
+它在上一轮基础上**补 3 组「最后一公里」变异**：
+
+- **D1**：`runKernel` 在 argv 末尾追加一个插件目录的 `--db`；
+- **E1**：`runKernel` 追加一个**重复**的 `--db`（`argparse` last-wins）；
+- **D3**：默认内核工厂在 args 里塞一个插件目录的 `--db`。
+
+**预期**：这 3 组对着**修复前**的实现必须**漏过**、对着**修复后**必须**捕获**。
+
+> 控制器已预验证过这个方案（`.tmp\task20-fix5\preverify.py`）：
+> **阶段 1（当前实现，无新断言）D1/E1 漏过；阶段 2（加上新断言）5 组全部捕获、0 漏过。**
+> 预验证过程中控制器修掉了自己脚本的**两个真 bug**：
+> ① Minor 1 的判据第一版写成 `!value.endsWith('agaistock.db') || ...` ——
+> R5 的默认值是插件**根目录**（不是 `.../agaistock.db`）⇒ 那个判据**恒真**；
+> ② R5/F2 的变异锚点匹配不到实际排版（静默「跳过」⇒ 覆盖率无声下降）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add miniapps/agaistock/test/api.test.mjs tools/clean-package-artifacts.py docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
+git commit -m "test: pin the kernel argv seam and make the fallback guard path-independent" -- miniapps/agaistock/test/api.test.mjs tools/clean-package-artifacts.py docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
+```
+
+> **不要用 `git add -A`**（Global Constraint 14）。
+> 本轮**不改 `server.mjs`、不改 `src/agaistock/**`**。
+
+---
+
 ---
 
 ## Appendix A: 常用命令速查
