@@ -491,9 +491,237 @@ test('start() keeps the observation file in the host data dir, not the plugin di
 
 test('handleRoute refuses to guess the kernel', async () => {
   // kernel 必须由调用方显式注入 —— 有默认分支就有盲区。
+  // ⚠️ 正则要匹配**守卫自己的消息**，不能只写 /kernel/ ——
+  // 守卫被删时 `TypeError: kernel is not a function` 也含 "kernel" ⇒ 会漏过。
   await assert.rejects(
     () => handleRoute(makeRequest('GET', '/api/observations'), new FakeResponse(), {}),
-    /kernel/,
+    /需要显式注入 kernel/,
   );
+});
+
+// ---- argv 通道护栏（fix round 4）----
+// Python 侧 `_default_db()` 是 **argv 优先于 env**（src/agaistock/cli.py:26-32：
+// `if db_arg: return Path(db_arg)` 先于 env 分支）⇒ 真正裁决 DB 落点的是
+// `handleRoute` 内部那些 `kernel([... '--db', dbPath, ...])`，**不是** env。
+// 前三轮只钉住了 env 通道，于是「把 --db 改回插件目录」这种变异能全绿通过。
+test('every kernel call carries the host db path', async () => {
+  const calls = [];
+  const kernel = async (args) => {
+    calls.push(args);
+    return { code: 0, stdout: '{"items":[]}', stderr: '' };
+  };
+  const dbPath = 'D:\\host\\data\\agaistock.db';
+  // ⚠️ dataDir 必须是个**真实存在**的目录：/api/review 会往 draftDir 写草稿文件。
+  const dataDir = await mkdtemp(join(tmpdir(), 'agaistock-argv-'));
+  try {
+    const routes = [
+      makeRequest('GET', '/api/status'),
+      makeRequest('GET', '/api/observations'),
+      makeRequest('GET', '/api/observations/obs_1/reviews'),
+      makeRequest('POST', '/api/review', { text: '章源钨业看多' }),
+      makeRequest('DELETE', '/api/observations/obs_1'),
+    ];
+    for (const request of routes) {
+      await handleRoute(request, new FakeResponse(), {
+        kernel,
+        dbPath,
+        dataDir,
+      });
+    }
+    assert.ok(calls.length >= routes.length, '每条路由都必须真的调内核');
+    for (const args of calls) {
+      const dbIdx = args.indexOf('--db');
+      assert.ok(dbIdx >= 0, `内核调用必须带 --db：${JSON.stringify(args)}`);
+      assert.equal(
+        args[dbIdx + 1],
+        dbPath,
+        `--db 必须是宿主给的数据库路径：${JSON.stringify(args)}`,
+      );
+    }
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('the structured observation draft lands in the host data dir', async () => {
+  const calls = [];
+  const kernel = async (args) => {
+    calls.push(args);
+    return { code: 0, stdout: '{"ok":true}', stderr: '' };
+  };
+  const dataDir = await mkdtemp(join(tmpdir(), 'agaistock-draft-'));
+  try {
+    const response = new FakeResponse();
+    await handleRoute(
+      makeRequest('POST', '/api/review', {
+        text: '章源钨业看多',
+        observation: { symbol: '002378', thesis: 'x' },
+      }),
+      response,
+      { kernel, dbPath: join(dataDir, 'agaistock.db'), dataDir },
+    );
+    assert.equal(response.statusCode, 200);
+    const idx = calls[0].indexOf('--observation-file');
+    assert.ok(idx >= 0, '结构化草稿必须经 --observation-file 传给内核');
+    const draftPath = calls[0][idx + 1];
+    // 草稿的落地目录由 handleRoute 的 draftDir 决定（dataDir || dirname(dbPath)）
+    // —— 它是**另一条**落点通道，不受 --db 断言覆盖。
+    assert.ok(
+      draftPath.startsWith(dataDir),
+      `草稿必须落进宿主 dataDir，实际落在 ${draftPath}`,
+    );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('start() gives the host data dir to every kernel call', async () => {
+  // 上面那条直接调 handleRoute，**绕过**了 start() 的接线 ——
+  // 而 start() → handleRoute 调用点上的 dbPath 是**另一条**通道。
+  // 这条走完整路径：start() → 真实 HTTP 请求 → 内核调用。
+  const calls = [];
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const dataDir = join(base, 'data');
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  const handle = await start(context, {
+    createKernel: (ctx, root, dbPath) => (args) => {
+      calls.push(args);
+      return Promise.resolve({ code: 0, stdout: '{"items":[]}', stderr: '' });
+    },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/observations`);
+    assert.equal(response.status, 200);
+  } finally {
+    await handle.dispose();
+    await rm(base, { recursive: true, force: true });
+  }
+  assert.ok(calls.length > 0, '内核必须真的被调用');
+  for (const args of calls) {
+    const dbIdx = args.indexOf('--db');
+    assert.ok(dbIdx >= 0, `内核调用必须带 --db：${JSON.stringify(args)}`);
+    assert.equal(
+      args[dbIdx + 1],
+      join(dataDir, 'agaistock.db'),
+      `--db 必须是宿主给的数据库路径：${JSON.stringify(args)}`,
+    );
+  }
+});
+
+test('start() keeps the review draft in the host data dir', async () => {
+  // R3（start() → handleRoute 调用点的 dataDir 指回插件目录）的真实危害是
+  // **草稿落点**：`/api/review` 的结构化草稿会写进插件目录。
+  // 上面的 start() 路径断言抓不到它 —— 那条只断言 `--db`（argv 通道），
+  // 而 R3 改的是 dataDir（草稿通道）。两条通道要分别断言。
+  const calls = [];
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const dataDir = join(base, 'data');
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  const handle = await start(context, {
+    createKernel: (ctx, root, dbPath) => (args) => {
+      calls.push(args);
+      return Promise.resolve({ code: 0, stdout: '{"ok":true}', stderr: '' });
+    },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/review`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        text: '章源钨业看多',
+        observation: { symbol: '002378', thesis: 'x' },
+      }),
+    });
+    assert.equal(response.status, 200);
+  } finally {
+    await handle.dispose();
+  }
+  assert.ok(calls.length > 0, '内核必须真的被调用');
+  const idx = calls[0].indexOf('--observation-file');
+  assert.ok(idx >= 0, '结构化草稿必须经 --observation-file 传给内核');
+  assert.ok(
+    calls[0][idx + 1].startsWith(dataDir),
+    `草稿必须落进宿主 dataDir，实际落在 ${calls[0][idx + 1]}`,
+  );
+  assert.ok(
+    !existsSync(join(pluginRoot, 'observations.json')),
+    '观察卡绝不能落进插件目录',
+  );
+  await rm(base, { recursive: true, force: true });
+});
+
+test('the kernel db path never falls back to the plugin dir', async () => {
+  // 两条**默认值 / 回落**通道：
+  //  R5 —— `handleRoute` 的 `dbPath` 默认值被改成 PLUGIN_ROOT；
+  //  R6 —— `draftDir` 优先取 `dirname(dbPath)` 而不是 `dataDir`。
+  // 上面那些测试都**显式传了** dbPath/dataDir ⇒ 把默认值盖掉了 ⇒ 抓不到这两条。
+  // 这条**不传** dbPath / dataDir，专门守「没给的时候不许落到插件目录」。
+  const calls = [];
+  const kernel = async (args) => {
+    calls.push(args);
+    return { code: 0, stdout: '{"items":[]}', stderr: '' };
+  };
+  const response = new FakeResponse();
+  await handleRoute(makeRequest('GET', '/api/observations'), response, { kernel });
+  assert.equal(response.statusCode, 200);
+  assert.ok(calls.length > 0, '内核必须被调用');
+  const dbIdx = calls[0].indexOf('--db');
+  assert.ok(dbIdx >= 0, '内核调用必须带 --db');
+  assert.ok(
+    !calls[0][dbIdx + 1].includes('agaistock'),
+    `没给 dbPath 时不许回落到插件目录，实际 ${calls[0][dbIdx + 1]}`,
+  );
+});
+
+test('the review draft follows the db path when no data dir is given', async () => {
+  // R6 的另一面：`handleRoute` 的 `draftDir = dataDir || dirname(dbPath)`。
+  // 宿主**总是**给 dataDir，所以 R6 在生产路径不可达 ——
+  // 但「dataDir 为空时草稿该落哪」必须有明确答案，不能由 `dirname(dbPath)` 悄悄决定。
+  // 这条断言：dataDir 为空时，草稿必须落在 **dbPath 所在目录**（而不是插件目录）。
+  //
+  // ⚠️ 关键：**dbPath 必须在 dataDir 之外的另一个目录** ——
+  // 否则 `dataDir || dirname(dbPath)` 与 `dirname(dbPath)` 落点相同，
+  // R6（把 `||` 去掉）就观测不出来。
+  const calls = [];
+  const kernel = async (args) => {
+    calls.push(args);
+    return { code: 0, stdout: '{"ok":true}', stderr: '' };
+  };
+  const base = await mkdtemp(join(tmpdir(), 'agaistock-nodd-'));
+  const dbDir = join(base, 'db');
+  const draftDir = join(base, 'draft');
+  await mkdir(dbDir, { recursive: true });
+  await mkdir(draftDir, { recursive: true });
+  try {
+    const dbPath = join(dbDir, 'agaistock.db');
+    const response = new FakeResponse();
+    await handleRoute(
+      makeRequest('POST', '/api/review', {
+        text: '章源钨业看多',
+        observation: { symbol: '002378', thesis: 'x' },
+      }),
+      response,
+      { kernel, dbPath, dataDir: draftDir },
+    );
+    assert.equal(response.statusCode, 200);
+    const idx = calls[0].indexOf('--observation-file');
+    assert.ok(idx >= 0, '结构化草稿必须经 --observation-file 传给内核');
+    assert.ok(
+      calls[0][idx + 1].startsWith(draftDir),
+      `草稿必须优先落进 dataDir，实际落在 ${calls[0][idx + 1]}`,
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
 

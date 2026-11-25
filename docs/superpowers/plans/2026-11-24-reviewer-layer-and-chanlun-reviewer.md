@@ -6297,7 +6297,8 @@ Expected: runtime `running`，open 成功。
 > `AGAISTOCK_DB` / `AGAISTOCK_DATA_DIR` 时，`config.data_dir()` 回落到
 > `repo_root()/"data"`（插件包副本里的 `repo_root()` 就是**包根**）⇒ 写出包内
 > `data/agaistock.db`（空库）。而**宿主会把 gitignored 产物一并拷进安装目录**
-> （实测 `.pyc` mtime 24/24 相同、18 个早于解包时刻）⇒ 该空库随 publish 进安装产物，
+> （实测仓库插件包与宿主持久安装目录的同名 24 个 `.pyc` **mtime 24/24 完全相同**；
+> 至于「有多少个早于解包时刻」**随解包批次变化**，**不要**把某个固定数字当证据）⇒ 该空库随 publish 进安装产物，
 > 宿主侧读到 0 行、真实数据却在 `context.dataDir` 的库里 → 用户会以为「一条观察都没有」。
 > `python tools/clean-package-artifacts.py --check` 只检查、发现残留时退出码 1。
 
@@ -8155,13 +8156,18 @@ work_dir.mkdir(parents=True, exist_ok=True)
    `data/` 已被 `.gitignore` 忽略，所以这些文件**不随包发布**，但每次运行都会在
    安装目录里重新生成一批。
    > **来源说明**：这 8 个 `data/chanlun/002378/*.json` 是**运行时写的** ——
-   > 仓库插件包、宿主持久安装目录、运行时解包副本**三处都没有 `data/` 目录**，
-   > 它们只存在于宿主 `context.dataDir` 下。
+   > 判定依据是**内容与时间**：宿主 `context.dataDir` 下那 8 个 JSON 的 mtime
+   > （`2026-11-24T14:34Z` 一带）与仓库根 `data/chanlun/002378/` 下那 8 个
+   > （`2026-11-24T11:18Z` 一带）**不同** ⇒ 不是同一批拷过去的。
+   > ⚠️ **不要**用「某个目录在不在」当证据 —— 宿主**会连 `data/` 目录一起拷**
+   > （实测宿主的安装目录里出现过 `data/agaistock.db`，mtime 与「在包目录直跑内核」
+   > 写出的时刻同一秒）。publish 前跑 `python tools/clean-package-artifacts.py` 清理。
    > ⚠️ 但**不要**把这条推广成「宿主不会拷 gitignored 产物」—— **那个一般命题是成立的**：
    > 实测仓库插件包 `miniapps/agaistock/src/agaistock/**` 的 24 个 `.pyc` 与宿主持久安装目录
-   > `~/.minimax/plugins/agaistock/src/agaistock/**` 的 24 个 `.pyc` **mtime 24/24 完全相同**，
-   > 其中 18 个还**早于**运行时解包时刻 ⇒ 这批 `.pyc` 确实是宿主拷进去的
-   > （`__pycache__` 是 gitignored 产物）。
+   > `~/.minimax/plugins/agaistock/src/agaistock/**` 的 24 个 `.pyc` **mtime 24/24 完全相同**
+   > （连亚秒都一致）⇒ 这批 `.pyc` **只能是宿主拷进去的**（`__pycache__` 是 gitignored 产物）。
+   > 至于「有多少个早于解包时刻」**随解包批次变化**（实测 19/24 ~ 24/24），
+   > **不要**把某个固定数字当证据 —— 决定性的是「mtime 逐个完全相同」这一条。
    > ⇒ **来源不可泛化**：文件计数、某个 `.pyc` 的 mtime，都不能用来推断别的文件的来源。
    > 缺陷本身由**代码 + 只读安装复现**证明，不靠文件计数。
 2. **只读安装会直接崩**：`work_dir.mkdir(parents=True, exist_ok=True)` 在只读目录上抛
@@ -8649,8 +8655,9 @@ git commit -m "fix: guard the host data dir wiring and make the kernel env herme
 > **13 组全部被护栏捕获，且每组红的是护栏集合里的测试**（不是无关测试碰巧红）。
 > 实现时若测试名与本节写法一致，这套判据可直接复用。
 
-> ⚠️ **本小节已被 fix round 3 补充**：默认内核工厂与 `start()` 局部 `dataDir`
-> 两处盲区已补（见下面 `### Task 20 · fix round 3` 小节）——
+> ⚠️ **本小节已被 fix round 3/4 补充**：默认内核工厂、`start()` 局部 `dataDir`、
+> **argv `--db` 通道**三处盲区已补（见下面 `### Task 20 · fix round 3`
+> 与 `### Task 20 · fix round 4` 小节）——
 > **别照着本小节 Step 2e 的默认实现写法实现**（它没把 `deps.spawnFn` 透传下去）。
 
 **Minor 1（headline）：fix round 1 的源码断言只锚定「调用点字面量存在」，没有验证数据流。**
@@ -9398,13 +9405,18 @@ test('handleRoute refuses to guess the kernel', async () => {
 
    ```
    > **来源说明**：这 8 个 `data/chanlun/002378/*.json` 是**运行时写的** ——
-   > 仓库插件包、宿主持久安装目录、运行时解包副本**三处都没有 `data/` 目录**，
-   > 它们只存在于宿主 `context.dataDir` 下。
+   > 判定依据是**内容与时间**：宿主 `context.dataDir` 下那 8 个 JSON 的 mtime
+   > （`2026-11-24T14:34Z` 一带）与仓库根 `data/chanlun/002378/` 下那 8 个
+   > （`2026-11-24T11:18Z` 一带）**不同** ⇒ 不是同一批拷过去的。
+   > ⚠️ **不要**用「某个目录在不在」当证据 —— 宿主**会连 `data/` 目录一起拷**
+   > （实测宿主的安装目录里出现过 `data/agaistock.db`，mtime 与「在包目录直跑内核」
+   > 写出的时刻同一秒）。publish 前跑 `python tools/clean-package-artifacts.py` 清理。
    > ⚠️ 但**不要**把这条推广成「宿主不会拷 gitignored 产物」—— **那个一般命题是成立的**：
    > 实测仓库插件包 `miniapps/agaistock/src/agaistock/**` 的 24 个 `.pyc` 与宿主持久安装目录
-   > `~/.minimax/plugins/agaistock/src/agaistock/**` 的 24 个 `.pyc` **mtime 24/24 完全相同**，
-   > 其中 18 个还**早于**运行时解包时刻 ⇒ 这批 `.pyc` 确实是宿主拷进去的
-   > （`__pycache__` 是 gitignored 产物）。
+   > `~/.minimax/plugins/agaistock/src/agaistock/**` 的 24 个 `.pyc` **mtime 24/24 完全相同**
+   > （连亚秒都一致）⇒ 这批 `.pyc` **只能是宿主拷进去的**（`__pycache__` 是 gitignored 产物）。
+   > 至于「有多少个早于解包时刻」**随解包批次变化**（实测 19/24 ~ 24/24），
+   > **不要**把某个固定数字当证据 —— 决定性的是「mtime 逐个完全相同」这一条。
    > ⇒ **来源不可泛化**：文件计数、某个 `.pyc` 的 mtime，都不能用来推断别的文件的来源。
    > 缺陷本身由**代码 + 只读安装复现**证明，不靠文件计数。
    ```
