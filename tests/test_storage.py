@@ -246,6 +246,8 @@ class WriteTransactionTests(unittest.TestCase):
             conn = db.connect(db_path)
             db.migrate(conn)
             # 竞争者用**短超时**：拿不到锁就立刻报错，不要把测试拖成 30 秒。
+            # ⚠️ 这是**探针式断言**（此刻拿不到写锁），不是生产的排队语义 ——
+            # 生产的 `db.connect()` 是排队 30 秒后才报 `database is locked`。
             other = sqlite3.connect(str(db_path), timeout=0.2)
             try:
                 with db.write_transaction(conn):
@@ -255,6 +257,115 @@ class WriteTransactionTests(unittest.TestCase):
                 # 事务正常退出 ⇒ 锁已释放 ⇒ 另一个连接能拿到。
                 other.execute("BEGIN IMMEDIATE")
                 other.rollback()
+            finally:
+                other.close()
+                conn.close()
+
+    def test_insert_observation_does_not_commit_inside_a_transaction(self):
+        """M2：`insert_observation` **不得**在事务中途自己提交（复审 Minor-2）。
+
+        判据：在写事务里插入后抛错 ⇒ 这一行必须**没有留在库里**。
+        若 `insert_observation` 内部自己 `commit()`，事务管理器的 `rollback()`
+        就撤销不了它 —— 用户会看到「保存失败」却留下一条半截记录。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            conn = db.connect(db_path)
+            db.migrate(conn)
+            try:
+                with self.assertRaises(RuntimeError):
+                    with db.write_transaction(conn):
+                        db.insert_observation(conn, dict(OBSERVATION))
+                        raise RuntimeError("boom-after-insert")
+                rows = conn.execute("SELECT COUNT(*) AS n FROM observations").fetchone()
+                self.assertEqual(rows["n"], 0, "事务内插入的行必须随事务一起回滚")
+                self.assertFalse(conn.in_transaction, "回滚后事务必须已经结束")
+            finally:
+                conn.close()
+
+    def test_insert_observation_commits_when_not_in_a_transaction(self):
+        """M2 的另一半：不在事务里时，`insert_observation` **仍然自己提交**。
+
+        判据：另一个连接能看到这一行 ⇒ 说明提交权在它自己手上，
+        没有把「无事务调用方」的落库路径改坏。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            conn = db.connect(db_path)
+            db.migrate(conn)
+            other = sqlite3.connect(str(db_path), timeout=5)
+            try:
+                db.insert_observation(conn, dict(OBSERVATION))
+                count = other.execute(
+                    "SELECT COUNT(*) FROM observations"
+                ).fetchone()[0]
+                self.assertEqual(count, 1, "不在事务里时 insert_observation 必须自己提交")
+            finally:
+                other.close()
+                conn.close()
+
+    def test_write_transaction_reuse_branch_rolls_back_on_error(self):
+        """M3：调用方已经在事务里时，内层 `write_transaction` 出错**也要回滚**（复审 Minor-3）。
+
+        判据三件套：异常照常抛出、事务被撤销（`in_transaction` 为假）、
+        **写锁被释放**（另一个连接能立刻拿到锁 —— 否则别的写者要干等 30 秒）。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            conn = db.connect(db_path)
+            db.migrate(conn)
+            other = sqlite3.connect(str(db_path), timeout=0.2)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                with self.assertRaises(RuntimeError):
+                    with db.write_transaction(conn):
+                        conn.execute(
+                            "INSERT INTO observations (id, symbol, created_at) "
+                            "VALUES ('obs_x', '002378', '2026-11-25T00:00:00+00:00')"
+                        )
+                        raise RuntimeError("boom-reuse")
+                self.assertFalse(
+                    conn.in_transaction, "出错后事务必须已经回滚（写锁才会被释放）"
+                )
+                rows = conn.execute("SELECT COUNT(*) AS n FROM observations").fetchone()
+                self.assertEqual(rows["n"], 0, "复用分支出错的写入必须被撤销")
+                # 写锁已释放：另一个连接能立刻拿到（拿不到 ⇒ 锁还悬着）。
+                other.execute("BEGIN IMMEDIATE")
+                other.rollback()
+            finally:
+                other.close()
+                conn.close()
+
+    def test_write_transaction_reuse_branch_does_not_commit(self):
+        """M3：复用分支**成功时不提交** —— 提交权归外层调用方。
+
+        判据：内层 `with` 结束后事务仍在（`in_transaction` 为真）、
+        别的连接还看不到这一行；外层显式 `commit()` 之后才可见。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            conn = db.connect(db_path)
+            db.migrate(conn)
+            other = sqlite3.connect(str(db_path), timeout=5)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                with db.write_transaction(conn):
+                    conn.execute(
+                        "INSERT INTO observations (id, symbol, created_at) "
+                        "VALUES ('obs_x', '002378', '2026-11-25T00:00:00+00:00')"
+                    )
+                self.assertTrue(
+                    conn.in_transaction, "复用分支不得擅自提交（提交权归外层调用方）"
+                )
+                seen = other.execute(
+                    "SELECT COUNT(*) FROM observations"
+                ).fetchone()[0]
+                self.assertEqual(seen, 0, "外层还没提交 ⇒ 别的连接看不到")
+                conn.commit()
+                seen = other.execute(
+                    "SELECT COUNT(*) FROM observations"
+                ).fetchone()[0]
+                self.assertEqual(seen, 1, "外层提交后这一行才可见")
             finally:
                 other.close()
                 conn.close()
@@ -278,6 +389,74 @@ class WriteTransactionTests(unittest.TestCase):
                 self.assertEqual(len(rows), 0, "写事务里出错必须回滚")
             finally:
                 conn.close()
+
+
+class ThreadSymbolTests(unittest.TestCase):
+    """M4：线程的「首次绑定代码」必须**显式且可查**（复审 Minor-4）。
+
+    语义：**先到先得（first writer binds）**。一条只有简称的根线程，
+    允许被第一个带代码的观察续接（否则同一只股票会裂成两条线程）；
+    但绑定一旦做出就**不再改变** —— 同一线程永远不会同时含两个不同代码。
+    """
+
+    def test_thread_symbol_is_empty_before_any_binding(self):
+        conn = make_conn()
+        root = db.insert_observation(conn, dict(OBSERVATION, symbol="", name="章源钨业"))
+        self.assertEqual(db.thread_symbol(conn, root), "", "没绑定过的线程代码为空")
+
+    def test_thread_symbol_is_the_first_bound_code(self):
+        conn = make_conn()
+        root = db.insert_observation(conn, dict(OBSERVATION, symbol="", name="章源钨业"))
+        db.insert_observation(
+            conn,
+            dict(OBSERVATION, symbol="002378", name="章源钨业"),
+            supersedes_id=root,
+            thread_id=root,
+        )
+        self.assertEqual(db.thread_symbol(conn, root), "002378")
+
+    def test_thread_symbol_is_the_first_binding_even_if_a_later_version_differs(self):
+        """「首次绑定」= **最早**那个带代码的存活行，哪怕后来出现了别的代码。
+
+        这是**防御性**语义：正常路径下同一条线程不会出现两个不同代码
+        （`cmd_review` 的续接逻辑保证），但历史数据 / 手工改库可能留下这种行 ——
+        此时必须报**原始绑定**（先到先得），而不是「最后看到的代码」。
+        """
+        conn = make_conn()
+        root = db.insert_observation(conn, dict(OBSERVATION, symbol="", name="章源钨业"))
+        first = db.insert_observation(
+            conn,
+            dict(OBSERVATION, symbol="002378", name="章源钨业"),
+            supersedes_id=root,
+            thread_id=root,
+        )
+        db.insert_observation(
+            conn,
+            dict(OBSERVATION, symbol="600519", name="章源钨业"),
+            supersedes_id=first,
+            thread_id=root,
+        )
+        self.assertEqual(
+            db.thread_symbol(conn, root), "002378", "必须报**首次绑定**的代码"
+        )
+
+    def test_thread_symbol_ignores_soft_deleted_versions(self):
+        conn = make_conn()
+        root = db.insert_observation(conn, dict(OBSERVATION, symbol="", name="章源钨业"))
+        coded = db.insert_observation(
+            conn,
+            dict(OBSERVATION, symbol="002378", name="章源钨业"),
+            supersedes_id=root,
+            thread_id=root,
+        )
+        db.soft_delete_observation(conn, coded)
+        self.assertEqual(
+            db.thread_symbol(conn, root), "", "软删掉的版本不算绑定"
+        )
+
+    def test_thread_symbol_of_unknown_thread_is_empty(self):
+        conn = make_conn()
+        self.assertEqual(db.thread_symbol(conn, "obs_nope"), "")
 
 
 class ObservationThreadTests(unittest.TestCase):

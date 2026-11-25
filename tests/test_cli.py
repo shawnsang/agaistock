@@ -505,6 +505,37 @@ class ContinuationCliTests(unittest.TestCase):
             self.assertEqual(second["version"], 2)
 
 
+    def test_review_payload_exposes_the_bound_symbol(self):
+        """M4：payload 必须带 `thread_symbol` 与 `thread_pending`（绑定状态可见）。
+
+        「无代码根线程吸收并发代码」的归属是**先到先得**（复审 Minor-4）：
+        绑定结果本身允许由调度决定，但必须**稳定且可查** ——
+        前端得能显示「这条线程现在属于哪只股票 / 还待定」。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            draft = self._draft(tmp, {
+                "symbol": "002378", "name": "章源钨业", "direction": "bullish",
+                "confidence": 0.7, "thesis": "钨价上涨",
+            })
+            # 第一次只给简称 ⇒ 线程还没有绑定任何代码。
+            first = self._run([
+                "review", "--symbol", "", "--name", "章源钨业",
+                "--text", "补充一句", "--observation-file", draft,
+                "--db", str(db_path), "--json",
+            ], db_path)
+            self.assertEqual(first["thread_symbol"], "", "还没绑定的线程没有代码")
+            self.assertTrue(first["thread_pending"], "还没绑定 ⇒ 必须是待定状态")
+            # 第二次解析出代码 ⇒ 绑定发生（先到先得），之后**不再改变**。
+            second = self._review(tmp, db_path, draft)
+            self.assertEqual(second["thread_symbol"], "002378")
+            self.assertFalse(second["thread_pending"])
+            self.assertEqual(first["thread_id"], second["thread_id"], "仍是同一条线程")
+            third = self._review(tmp, db_path, draft)
+            self.assertEqual(third["thread_symbol"], "002378", "绑定一旦做出就不再改变")
+            self.assertFalse(third["thread_pending"])
+
+
 class ConcurrentContinuationTests(unittest.TestCase):
     """并发续接（Task 21 fix round 2）：两个进程同时点评同一只标的。
 
@@ -553,6 +584,11 @@ class ConcurrentContinuationTests(unittest.TestCase):
             original = db.find_thread_head
 
             def probe(conn, symbol, name=""):
+                # ⚠️ `timeout=0.2` 是**探针式断言**：拿不到锁就立刻报错，
+                # 不把测试拖成 30 秒。生产的 `db.connect()` 是 **排队 30 秒**
+                # 才报 `database is locked`（两个进程同时点评同一只标的时，
+                # 第二个会等第一个的写事务结束）。两者语义不同：这里要的是
+                # 「此刻拿不到写锁」，不是「最终会失败」。
                 contender = sqlite3.connect(str(db_path), timeout=0.2)
                 try:
                     contender.execute("BEGIN IMMEDIATE")
@@ -613,6 +649,82 @@ class ConcurrentContinuationTests(unittest.TestCase):
             second = children[root][0]
             self.assertEqual(len(children.get(second, [])), 1,
                              "第二个版本只能有一个后继（版本链分叉了）")
+
+
+class ThreadBindingConcurrencyTests(unittest.TestCase):
+    """M4：并发到达的**不同代码**不能把一条线程搞成两个代码（复审 Minor-4）。
+
+    语义是**先到先得（first writer binds）**：哪一条先拿到写锁由调度决定，
+    这不是缺陷 —— 但绑定结果必须**稳定、可查**：
+      ① 任何一条线程都不得含两个不同代码；
+      ② 未绑定的根线程只绑定**一个**代码；
+      ③ 再查 `thread_symbol` 结果**不变**。
+    """
+
+    def _seed_root(self, db_path):
+        conn = db.connect(db_path)
+        try:
+            db.migrate(conn)
+            return db.insert_observation(conn, {
+                "symbol": "", "name": "同名股", "direction": "bullish",
+                "thesis": "先记的简称", "confidence": 0.6,
+            })
+        finally:
+            conn.close()
+
+    def _argv(self, db_path, symbol):
+        return [
+            "review", "--symbol", symbol, "--name", "同名股",
+            "--text", "补充一句", "--db", str(db_path), "--json",
+        ]
+
+    def test_concurrent_codes_never_bind_two_codes_to_one_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            root = self._seed_root(db_path)
+            symbols = ["600519", "002378", "601318"]
+
+            def worker(symbol):
+                cli.main(self._argv(db_path, symbol))
+
+            # ⚠️ 补丁必须打在**主线程**、覆盖整个并发窗口：
+            # `mock.patch` 改的是**模块全局属性**，放在工作线程里各自打/撤会互相踩 ——
+            # 一个线程退出补丁时把全局函数还原了，另一个线程于是调到真函数，
+            # 连带把别的测试（注册表）搞挂。
+            with mock.patch.object(cli.registry, "load_reviewers", return_value=[]), \
+                 mock.patch("builtins.print"):
+                workers = [threading.Thread(target=worker, args=(s,)) for s in symbols]
+                for thread in workers:
+                    thread.start()
+                for thread in workers:
+                    thread.join(60)
+                    self.assertFalse(thread.is_alive(), "并发评审必须结束")
+
+            conn = db.connect(db_path)
+            try:
+                rows = db.list_threads(conn)
+                codes_by_thread = {}
+                for row in rows:
+                    thread_id = row["thread_id"]
+                    versions = db.thread_versions(conn, thread_id)
+                    codes = {(v.get("symbol") or "").strip() for v in versions}
+                    codes.discard("")
+                    codes_by_thread[thread_id] = codes
+                    self.assertLessEqual(
+                        len(codes), 1,
+                        f"线程 {thread_id} 混进了多个代码：{sorted(codes)}",
+                    )
+                root_codes = codes_by_thread[root]
+                self.assertEqual(len(root_codes), 1, "未绑定的根线程必须只绑定一个代码")
+                bound = next(iter(root_codes))
+                self.assertEqual(db.thread_symbol(conn, root), bound)
+                self.assertEqual(
+                    db.thread_symbol(conn, root), bound, "绑定一旦做出就不再改变"
+                )
+                # 其余两个代码各自另开线程 ⇒ 根线程 + 两条新线程。
+                self.assertEqual(len(rows), 3, "三个不同代码 ⇒ 三条线程")
+            finally:
+                conn.close()
 
 
 if __name__ == "__main__":

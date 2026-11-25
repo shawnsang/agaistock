@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -893,6 +893,39 @@ test('the plugin-root guard recognizes every spelling of the plugin root', () =>
   );
 });
 
+test('isPathInside resolves .. by path semantics, not by string prefix', () => {
+  // fix round 11 复审 Minor-1：`..` 判据**零覆盖**。
+  //
+  // 旧用例写的是 `resolve(join(root, '..', ...))` —— `path.resolve` 会把 `..`
+  // **化简掉** ⇒ 断言的其实是**化简后**的路径，`isPathInside` 里那三行
+  // （`relative()` / `isAbsolute(rel)` / `rel.split(...).includes('..')`）
+  // 一条都没被钉住：把判据退回**朴素前缀比较**，Node 仍然 81/81 全绿（漏过）。
+  //
+  // ⇒ 这里必须用**字面量 `..`** 拼路径：测试里**不许**出现 `resolve()` / `join()`，
+  //    它们都会把 `..` 化简掉。
+  const root = resolve(join(import.meta.dirname, '..'));
+  const base = basename(root);
+  const cases = [
+    [`${root}${sep}..${sep}evil${sep}x.db`, false, '往上爬出根 ⇒ 在根外'],
+    [`${root}${sep}data${sep}..${sep}..${sep}evil.db`, false, '爬两级出根 ⇒ 在根外'],
+    [`${root}${sep}sub${sep}..${sep}inside.db`, true, '爬回根内 ⇒ 在根内'],
+    [`${root}${sep}..${sep}${base}${sep}inside.db`, true, '绕一圈回到根内 ⇒ 在根内'],
+  ];
+  for (const [candidate, expected, why] of cases) {
+    assert.equal(
+      isPathInside(root, candidate),
+      expected,
+      `${why}：${candidate}（朴素前缀比较会把「爬出根」误判成「在根内」）`,
+    );
+    // 纯函数：重复调用必须给同样的答案。
+    assert.equal(
+      isPathInside(root, candidate),
+      expected,
+      `重复调用结果必须稳定：${candidate}`,
+    );
+  }
+});
+
 test('start() refuses to run when the kernel database would land in the plugin dir', async () => {
   // 护栏不能只是「测试里的约定」—— 插件目录是**安装产物**（重装会被覆盖，也可能只读），
   // 把运行数据写进去正是 Task 20 要消灭的事。⇒ `start()` 必须**当场拒绝**。
@@ -915,6 +948,20 @@ test('start() refuses to run when the kernel database would land in the plugin d
       /context\.dataDir/,
       'dataDir 在插件目录之内时必须拒绝启动',
     );
+    // ③ dataDir 里带**字面量 `..`**、化简后仍在插件根之内 ⇒ 必须拒绝
+    //    （路径语义上 `root/sub/../data` 就是 `root/data`）
+    const sneaky = `${pluginRoot}${sep}sub${sep}..${sep}data`;
+    await assert.rejects(
+      () => start({ dataDir: sneaky, pluginRoot, listen, signal }, kernel),
+      /context\.dataDir/,
+      'dataDir 里的 `..` 不能绕过护栏（化简后仍在插件目录之内）',
+    );
+    // ④ dataDir 经 `..` 绕到插件根**之外** ⇒ 那不是插件目录 ⇒ 必须放行
+    //    （护栏只拦「落进插件目录」，不是「一切带 `..` 的路径」）
+    const outside = `${pluginRoot}${sep}..${sep}outside-data`;
+    const running = await start({ dataDir: outside, pluginRoot, listen, signal }, kernel);
+    assert.ok(running.port > 0, 'dataDir 在插件根之外时必须能正常启动');
+    await running.dispose();
   } finally {
     await rm(base, { recursive: true, force: true });
   }

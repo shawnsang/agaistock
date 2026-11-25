@@ -85,7 +85,8 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 30000")
+    # ⚠️ 不再单独 `PRAGMA busy_timeout = 30000`：`timeout=30` 本身就会把
+    # busy_timeout 设成 30000（毫秒）。两处同义配置容易在改一处时漏改（复审 Nit-1）。
     return conn
 
 
@@ -99,10 +100,24 @@ def write_transaction(conn: sqlite3.Connection):
 
     ⚠️ 必须是 `BEGIN IMMEDIATE`（**立即**拿写锁）：延迟事务（`BEGIN`）
     要到第一次写才拿锁 ⇒ 两个进程仍然能各自读到同一个 head。
+
+    **两条分支的语义不同**（复审 Nit-2 / Minor-3，Task 21 fix round 3）：
+
+    - **主分支**（自己开事务）：正常退出 ⇒ **提交**；抛错 ⇒ **回滚**。
+    - **复用分支**（调用方已经在事务里）：**不 begin、不提交** ——
+      提交权归外层调用方；但**抛错时仍然回滚**，把这一块的写入撤销、
+      并把写锁释放掉（否则别的写者要干等 30 秒才拿到锁）。
+      ⚠️ SQLite **不支持部分回滚**：这里的 `rollback()` 会连带撤销**同一个事务里
+      此前**的写入 —— 这与 SQLite 的事务语义一致（事务要么整体成立，要么整体作废）。
     """
     if conn.in_transaction:
         # 已经在事务里（调用方自己开的）⇒ 不重复 begin，直接用外层那个。
-        yield conn
+        # ⚠️ 这一分支**不提交**：提交权归外层调用方。
+        try:
+            yield conn
+        except Exception:
+            conn.rollback()
+            raise
         return
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -166,9 +181,16 @@ def insert_observation(
 
     `thread_id` 缺省时取本行 id —— 自己就是线程根；
     `supersedes_id` 是本版本取代的那一行（第一版为 NULL）。
+
+    ⚠️ **提交权**：已经在事务里时**不自己提交**（提交权归事务管理器，
+    复审 Minor-2 / Task 21 fix round 3）—— 否则事务管理器的 `rollback()`
+    撤销不了这一行，「出错不留痕」就只是纸面保证。
+    不在事务里时**自己提交**（无事务调用方的落库路径不能被改坏）。
     """
     obs_id = observation.get("id") or _new_id("obs")
     thread = str(thread_id) if thread_id else obs_id
+    # ⚠️ 必须在 INSERT **之前**取：INSERT 之后 `in_transaction` 就会变成真。
+    already_in_transaction = conn.in_transaction
     conn.execute(
         """INSERT INTO observations
            (id, symbol, name, created_at, direction, thesis, confidence,
@@ -194,7 +216,8 @@ def insert_observation(
             thread,
         ),
     )
-    conn.commit()
+    if not already_in_transaction:
+        conn.commit()
     return obs_id
 
 
@@ -279,16 +302,33 @@ def _thread_head_by_name(
     return _row_to_item(rows[0]), thread_id
 
 
-def _thread_has_coded_version(conn: sqlite3.Connection, thread_id: str) -> bool:
-    """这条线程里有没有**带代码**的存活版本行。"""
+def thread_symbol(conn: sqlite3.Connection, thread_id: str) -> str:
+    """这条线程**首次绑定**的股票代码；还没绑定过则返回 ""。
+
+    「首次绑定」= 这条线程里**按版本序最早**的那条**带代码**的存活行。
+
+    ⚠️ 绑定语义是**先到先得（first writer binds）**（复审 Minor-4，
+    Task 21 fix round 3）：一条只有简称的根线程，允许被**第一个**带代码的
+    观察续接 —— 否则「先没解析出代码、后来解析出来了」会裂成两条线程，
+    同一只股票的延续性就没了。但绑定一旦做出**就不再改变**：
+    同一线程永远不会同时含两个不同代码，且绑定结果**可查**（就是这个函数）。
+    """
     row = conn.execute(
-        """SELECT 1 FROM observations
+        """SELECT symbol FROM observations
            WHERE (thread_id = ? OR id = ?) AND deleted_at IS NULL
              AND symbol IS NOT NULL AND TRIM(symbol) <> ''
+           ORDER BY created_at ASC, rowid ASC
            LIMIT 1""",
-        (thread_id, thread_id),
+        (str(thread_id), str(thread_id)),
     ).fetchone()
-    return row is not None
+    if row is None:
+        return ""
+    return str(row["symbol"]).strip()
+
+
+def _thread_has_coded_version(conn: sqlite3.Connection, thread_id: str) -> bool:
+    """这条线程里有没有**带代码**的存活版本行。"""
+    return bool(thread_symbol(conn, thread_id))
 
 
 def find_thread_head(
@@ -306,6 +346,14 @@ def find_thread_head(
 
     回落**只对「当初没记代码」的线程开放**：候选线程里只要有**带代码**的存活版本行，
     就说明它是另一只标的（同名不同代码）—— 宁可不续接。
+
+    ⚠️ **绑定语义：先到先得（first writer binds）**（复审 Minor-4，
+    Task 21 fix round 3）。一条**还没有代码**的根线程，会被**第一个**带代码的
+    观察续接 —— 这条观察就把代码**绑定**到该线程上了。哪一条先拿到写锁由
+    并发调度决定，这是**已知且可接受**的语义（不是缺陷）：绑定结果
+    **稳定**（一条线程不会出现两个不同代码）且**可查**
+    （见 `thread_symbol`）。需要看当前绑定状态时用 `thread_symbol`，
+    不要再靠「有没有代码行」反推。
     """
     symbol = str(symbol or "").strip()
     name = str(name or "").strip()

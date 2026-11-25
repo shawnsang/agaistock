@@ -239,6 +239,10 @@ def cmd_review(args) -> int:
             if entry["observation_id"] != observation_id
         ]
         version_count = len(history) + 1
+        # 线程的**绑定状态**（复审 Minor-4）：`thread_symbol` 是这条线程首次
+        # 绑定的代码，`thread_pending` 表示还没绑定（只有简称）。
+        # 归属是**先到先得**，但必须稳定可查 —— 前端据此显示「属于哪只股票 / 待定」。
+        thread_symbol = db.thread_symbol(conn, thread_id)
         payload = {
             "observation_id": observation_id,
             "thread_id": thread_id,
@@ -246,6 +250,8 @@ def cmd_review(args) -> int:
             "version_count": version_count,
             "supersedes_id": previous["id"] if previous else None,
             "first_seen_at": db.thread_started_at(conn, thread_id),
+            "thread_symbol": thread_symbol,
+            "thread_pending": not thread_symbol,
             "reviews": saved,
             "history": history,
             "score": score,
