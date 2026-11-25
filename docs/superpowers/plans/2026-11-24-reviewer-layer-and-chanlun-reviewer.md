@@ -9465,6 +9465,442 @@ git commit -m "fix: observe the default kernel factory and the observation file 
 
 ---
 
+### Task 20 · fix round 4 — 钉住 **argv 通道**（真正裁决 DB 落点的那条）
+
+> **来源**：Task 20 fix round 3 的 scoped 复审（verifier）—— **PASS-WITH-MINORS**，
+> 0 Critical，但有 **1 条 Important + 2 条 Minor + 2 条 Nit**。
+> 控制器已**独立复现全部**（自己的变异脚本 + 真实跑内核 + 自己的 `.pyc`/`data/` 实地测量），
+> 结论与评审方一致。
+
+**fix round 3 的 3 条 Important 已全部真正闭合** —— 评审方独立复现了「先红后绿」
+（修复前漏过 8 组，与控制器预告**逐组吻合**；修复后全部转为捕获），
+并用端到端探针（只换 `spawn`，真调 `start(context)` **不传 deps**）确认
+**生产路径已被观测**：`env` / `cwd` / `PYTHONPATH` / `--db` 全部指向宿主给的值。
+
+---
+
+**Important 1（headline）：`handleRoute` 内部的 argv `--db` 通道零护栏。**
+
+前两轮（包括 round 3）钉住的**全是 `env` 通道**。但**真正裁决 DB 落点的是 argv**：
+
+```python
+# src/agaistock/cli.py:26-32
+def _default_db(db_arg: str | None) -> Path:
+    if db_arg:
+        return Path(db_arg)          # ← argv 优先，先于 env
+    env_db = os.environ.get("AGAISTOCK_DB", "").strip()
+    if env_db:
+        return Path(env_db)
+    return config.repo_root() / DEFAULT_DB
+```
+
+控制器**真实跑内核**证实（`--db` 指到 `.tmp` 下，不碰真实运行库）：
+
+```
+argv --db        = .tmp\argv-probe\plugindir\agaistock.db
+env AGAISTOCK_DB = .tmp\argv-probe\hostdir\host.db
+→ 插件目录里有 db = True    (argv 赢)
+→ 宿主目录里有 db = False   (env 被忽略)
+```
+
+⇒ **env 绿 ≠ DB 落点对。**
+
+评审方实测 6 组变异**全部漏过**（exit 0，61 条测试全绿）：
+
+| # | 变异 | 评审方 | 控制器复现 |
+|---|---|---|---|
+| R7 | `handleRoute` 内部 `--db` 指回插件目录 | 漏过 | **漏过 ✓** |
+| R8 | `countObservations` 的 `--db` 指回插件目录 | 漏过 | **漏过 ✓** |
+| R9 | `/api/review` 的 `--db` 指回插件目录 | 漏过 | **漏过 ✓** |
+| R10 | `DELETE` 的 `--db` 指回插件目录 | 漏过 | **漏过 ✓** |
+| R11 | `reviews` 路由的 `--db` 指回插件目录 | （新增） | **漏过 ✓** |
+| R3 | `start()` → `handleRoute` 调用点的 `dataDir` 指回插件目录 | 漏过 | **漏过 ✓** |
+
+**R3 的危害不同**：它改的是 `dataDir`（不是 `dbPath`），所以 `--db` 断言抓不到 ——
+真正受害的是 `/api/review` 的结构化草稿 `observation-*.json` 落进**插件目录**
+（评审方端到端探针实证：插件根 `["miniapp","observation-mwvdle7d-sc54zp.json"]`，宿主 dataDir 空）。
+
+> **这与 fix round 1/2/3 的盲区同构**：被观测的对象（`env`）与实际生效的对象（`argv`）不是同一个。
+
+**Minor 1**：计划新写的证据句「其中 **18** 个还早于运行时解包时刻」**不可复现**。
+控制器独立实测：仓库插件包与宿主持久安装目录的 24 个 `.pyc` **mtime 24/24 完全相同**（成立），
+但「早于解包时刻」的个数随解包批次变化（评审方测 19/24，当前副本 24/24）⇒ **不能用固定数字**。
+
+**Minor 2**：新写的「三处**都没有** `data/` 目录」**当时为假** ——
+复审当天 08:02-08:03 实测三处**都有**（宿主安装目录与解包副本里的 `data/agaistock.db`
+mtime = `2026-11-24 22:42:10`，与「在包目录直跑内核」写出的时刻同一秒
+⇒ **宿主连 `data/` 目录一起拷**）。控制器随后清理了污染并加了防线
+（`tools/clean-package-artifacts.py`，commit `36c0825`），所以**现在**三处确实都没有 ——
+但这说明**「目录在不在」不是一条稳定的证据**。
+
+> 结论本身仍成立：宿主 dataDir 下那 8 个 `chanlun/*.json` 与仓库根 `data/` 下那 8 个
+> **mtime 不同**（控制器实测 `1795530866..875` vs `1795519127..135`）
+> ⇒ 确为运行时写的，不是拷过去的。
+
+**Nit 1**：计划 fix round 2 小节顶部横幅说「两处盲区已补」，本轮还剩一处生产面没补 ⇒ 扩成三处。
+
+**Nit 2**：`handleRoute refuses to guess the kernel` 的 `rejects(/kernel/)` **偏弱** ——
+守卫被整个删掉时 `TypeError: kernel is not a function` 也含 "kernel" ⇒ 漏过。
+
+---
+
+**修法：把 argv 通道也钉住。**
+
+- 一条测试断言**所有路由**的 `--db` argv 都等于宿主给的 `dbPath`（覆盖 R7/R8/R9/R10/R11）。
+- 一条走 `start()` 完整路径的测试断言**草稿落点**在宿主 dataDir（覆盖 R3）。
+- 一条走 `start()` 完整路径的测试断言 `--db` argv（覆盖 R1 与调用点 `dbPath`）。
+- 收紧 `rejects` 正则（覆盖 C3）。
+- 文档：把两个不可复现的证据句改成**可复现**的表述。
+
+**Files:**
+- Modify: `miniapps/agaistock/test/api.test.mjs`
+- Modify: `docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md`
+- Modify: `docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md`
+
+> ⚠️ **本轮不改 `server.mjs`** —— 评审方确认实现本身**正确**：
+> 端到端探针在**未改动的实现**上实测 `env`/`cwd`/`PYTHONPATH`/`--db` **全部正确**。
+> 这一轮是**补护栏**，不是改实现。
+
+**Interfaces:**
+- Consumes: 无（只加测试与文档）
+- Produces: 无（对外契约不变）
+
+- [ ] **Step 1: 加六条测试 + 收紧一条断言（`api.test.mjs`）**
+
+**1a) 收紧 `handleRoute refuses to guess the kernel` 的正则**（Nit 2）：
+
+```javascript
+test('handleRoute refuses to guess the kernel', async () => {
+  // kernel 必须由调用方显式注入 —— 有默认分支就有盲区。
+  // ⚠️ 正则要匹配**守卫自己的消息**，不能只写 /kernel/ ——
+  // 守卫被删时 `TypeError: kernel is not a function` 也含 "kernel" ⇒ 会漏过。
+  await assert.rejects(
+    () => handleRoute(makeRequest('GET', '/api/observations'), new FakeResponse(), {}),
+    /需要显式注入 kernel/,
+  );
+});
+```
+
+**1b) 追加六条测试**（文件末尾）：
+
+```javascript
+// ---- argv 通道护栏（fix round 4）----
+// Python 侧 `_default_db()` 是 **argv 优先于 env**（src/agaistock/cli.py:26-32：
+// `if db_arg: return Path(db_arg)` 先于 env 分支）⇒ 真正裁决 DB 落点的是
+// `handleRoute` 内部那些 `kernel([... '--db', dbPath, ...])`，**不是** env。
+// 前三轮只钉住了 env 通道，于是「把 --db 改回插件目录」这种变异能全绿通过。
+test('every kernel call carries the host db path', async () => {
+  const calls = [];
+  const kernel = async (args) => {
+    calls.push(args);
+    return { code: 0, stdout: '{"items":[]}', stderr: '' };
+  };
+  const dbPath = 'D:\\host\\data\\agaistock.db';
+  // ⚠️ dataDir 必须是个**真实存在**的目录：/api/review 会往 draftDir 写草稿文件。
+  const dataDir = await mkdtemp(join(tmpdir(), 'agaistock-argv-'));
+  try {
+    const routes = [
+      makeRequest('GET', '/api/status'),
+      makeRequest('GET', '/api/observations'),
+      makeRequest('GET', '/api/observations/obs_1/reviews'),
+      makeRequest('POST', '/api/review', { text: '章源钨业看多' }),
+      makeRequest('DELETE', '/api/observations/obs_1'),
+    ];
+    for (const request of routes) {
+      await handleRoute(request, new FakeResponse(), {
+        kernel,
+        dbPath,
+        dataDir,
+      });
+    }
+    assert.ok(calls.length >= routes.length, '每条路由都必须真的调内核');
+    for (const args of calls) {
+      const dbIdx = args.indexOf('--db');
+      assert.ok(dbIdx >= 0, `内核调用必须带 --db：${JSON.stringify(args)}`);
+      assert.equal(
+        args[dbIdx + 1],
+        dbPath,
+        `--db 必须是宿主给的数据库路径：${JSON.stringify(args)}`,
+      );
+    }
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('the structured observation draft lands in the host data dir', async () => {
+  const calls = [];
+  const kernel = async (args) => {
+    calls.push(args);
+    return { code: 0, stdout: '{"ok":true}', stderr: '' };
+  };
+  const dataDir = await mkdtemp(join(tmpdir(), 'agaistock-draft-'));
+  try {
+    const response = new FakeResponse();
+    await handleRoute(
+      makeRequest('POST', '/api/review', {
+        text: '章源钨业看多',
+        observation: { symbol: '002378', thesis: 'x' },
+      }),
+      response,
+      { kernel, dbPath: join(dataDir, 'agaistock.db'), dataDir },
+    );
+    assert.equal(response.statusCode, 200);
+    const idx = calls[0].indexOf('--observation-file');
+    assert.ok(idx >= 0, '结构化草稿必须经 --observation-file 传给内核');
+    const draftPath = calls[0][idx + 1];
+    // 草稿的落地目录由 handleRoute 的 draftDir 决定（dataDir || dirname(dbPath)）
+    // —— 它是**另一条**落点通道，不受 --db 断言覆盖。
+    assert.ok(
+      draftPath.startsWith(dataDir),
+      `草稿必须落进宿主 dataDir，实际落在 ${draftPath}`,
+    );
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('start() gives the host data dir to every kernel call', async () => {
+  // 上面那条直接调 handleRoute，**绕过**了 start() 的接线 ——
+  // 而 start() → handleRoute 调用点上的 dbPath 是**另一条**通道。
+  // 这条走完整路径：start() → 真实 HTTP 请求 → 内核调用。
+  const calls = [];
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const dataDir = join(base, 'data');
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  const handle = await start(context, {
+    createKernel: (ctx, root, dbPath) => (args) => {
+      calls.push(args);
+      return Promise.resolve({ code: 0, stdout: '{"items":[]}', stderr: '' });
+    },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/observations`);
+    assert.equal(response.status, 200);
+  } finally {
+    await handle.dispose();
+    await rm(base, { recursive: true, force: true });
+  }
+  assert.ok(calls.length > 0, '内核必须真的被调用');
+  for (const args of calls) {
+    const dbIdx = args.indexOf('--db');
+    assert.ok(dbIdx >= 0, `内核调用必须带 --db：${JSON.stringify(args)}`);
+    assert.equal(
+      args[dbIdx + 1],
+      join(dataDir, 'agaistock.db'),
+      `--db 必须是宿主给的数据库路径：${JSON.stringify(args)}`,
+    );
+  }
+});
+
+test('start() keeps the review draft in the host data dir', async () => {
+  // R3（start() → handleRoute 调用点的 dataDir 指回插件目录）的真实危害是
+  // **草稿落点**：`/api/review` 的结构化草稿会写进插件目录。
+  // 上面的 start() 路径断言抓不到它 —— 那条只断言 `--db`（argv 通道），
+  // 而 R3 改的是 dataDir（草稿通道）。两条通道要分别断言。
+  const calls = [];
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const dataDir = join(base, 'data');
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  const handle = await start(context, {
+    createKernel: (ctx, root, dbPath) => (args) => {
+      calls.push(args);
+      return Promise.resolve({ code: 0, stdout: '{"ok":true}', stderr: '' });
+    },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${handle.port}/api/review`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        text: '章源钨业看多',
+        observation: { symbol: '002378', thesis: 'x' },
+      }),
+    });
+    assert.equal(response.status, 200);
+  } finally {
+    await handle.dispose();
+  }
+  assert.ok(calls.length > 0, '内核必须真的被调用');
+  const idx = calls[0].indexOf('--observation-file');
+  assert.ok(idx >= 0, '结构化草稿必须经 --observation-file 传给内核');
+  assert.ok(
+    calls[0][idx + 1].startsWith(dataDir),
+    `草稿必须落进宿主 dataDir，实际落在 ${calls[0][idx + 1]}`,
+  );
+  assert.ok(
+    !existsSync(join(pluginRoot, 'observations.json')),
+    '观察卡绝不能落进插件目录',
+  );
+  await rm(base, { recursive: true, force: true });
+});
+
+test('the kernel db path never falls back to the plugin dir', async () => {
+  // 两条**默认值 / 回落**通道：
+  //  R5 —— `handleRoute` 的 `dbPath` 默认值被改成 PLUGIN_ROOT；
+  //  R6 —— `draftDir` 优先取 `dirname(dbPath)` 而不是 `dataDir`。
+  // 上面那些测试都**显式传了** dbPath/dataDir ⇒ 把默认值盖掉了 ⇒ 抓不到这两条。
+  // 这条**不传** dbPath / dataDir，专门守「没给的时候不许落到插件目录」。
+  const calls = [];
+  const kernel = async (args) => {
+    calls.push(args);
+    return { code: 0, stdout: '{"items":[]}', stderr: '' };
+  };
+  const response = new FakeResponse();
+  await handleRoute(makeRequest('GET', '/api/observations'), response, { kernel });
+  assert.equal(response.statusCode, 200);
+  assert.ok(calls.length > 0, '内核必须被调用');
+  const dbIdx = calls[0].indexOf('--db');
+  assert.ok(dbIdx >= 0, '内核调用必须带 --db');
+  assert.ok(
+    !calls[0][dbIdx + 1].includes('agaistock'),
+    `没给 dbPath 时不许回落到插件目录，实际 ${calls[0][dbIdx + 1]}`,
+  );
+});
+
+test('the review draft follows the db path when no data dir is given', async () => {
+  // R6 的另一面：`handleRoute` 的 `draftDir = dataDir || dirname(dbPath)`。
+  // 宿主**总是**给 dataDir，所以 R6 在生产路径不可达 ——
+  // 但「dataDir 为空时草稿该落哪」必须有明确答案，不能由 `dirname(dbPath)` 悄悄决定。
+  // 这条断言：dataDir 为空时，草稿必须落在 **dbPath 所在目录**（而不是插件目录）。
+  //
+  // ⚠️ 关键：**dbPath 必须在 dataDir 之外的另一个目录** ——
+  // 否则 `dataDir || dirname(dbPath)` 与 `dirname(dbPath)` 落点相同，
+  // R6（把 `||` 去掉）就观测不出来。
+  const calls = [];
+  const kernel = async (args) => {
+    calls.push(args);
+    return { code: 0, stdout: '{"ok":true}', stderr: '' };
+  };
+  const base = await mkdtemp(join(tmpdir(), 'agaistock-nodd-'));
+  const dbDir = join(base, 'db');
+  const draftDir = join(base, 'draft');
+  await mkdir(dbDir, { recursive: true });
+  await mkdir(draftDir, { recursive: true });
+  try {
+    const dbPath = join(dbDir, 'agaistock.db');
+    const response = new FakeResponse();
+    await handleRoute(
+      makeRequest('POST', '/api/review', {
+        text: '章源钨业看多',
+        observation: { symbol: '002378', thesis: 'x' },
+      }),
+      response,
+      { kernel, dbPath, dataDir: draftDir },
+    );
+    assert.equal(response.statusCode, 200);
+    const idx = calls[0].indexOf('--observation-file');
+    assert.ok(idx >= 0, '结构化草稿必须经 --observation-file 传给内核');
+    assert.ok(
+      calls[0][idx + 1].startsWith(draftDir),
+      `草稿必须优先落进 dataDir，实际落在 ${calls[0][idx + 1]}`,
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+```
+
+> `mkdtemp` / `rm` / `tmpdir` / `existsSync` / `mkdir` **fix round 3 已经 import 了**
+> （`import { existsSync, readFileSync } from 'node:fs';`
+> `import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises';`
+> `import { tmpdir } from 'node:os';`）—— 不用再加 import。
+> `makeScratchPluginRoot()` 也已存在，直接用。
+> **六条测试各自的通道**（别混淆）：
+> | 测试 | 守的通道 | 堵住的变异 |
+> |---|---|---|
+> | `every kernel call carries the host db path` | 所有路由的 `--db` argv | R7/R8/R9/R10/R11 |
+> | `the structured observation draft lands in the host data dir` | 草稿落点（直接调 handleRoute） | R3 |
+> | `start() gives the host data dir to every kernel call` | `start()` → 内核的 `--db` argv | R1 |
+> | `start() keeps the review draft in the host data dir` | `start()` → 草稿落点 | R3 |
+> | `the kernel db path never falls back to the plugin dir` | **不传** dbPath 时的默认值 | R5 |
+> | `the review draft follows the db path when no data dir is given` | `draftDir` 的优先级 | R6 |
+
+- [ ] **Step 2: 文档订正（Minor 1 / Minor 2 / Nit 1）**
+
+1. **计划 Task 20 小节**的「来源说明」里那句「其中 18 个还**早于**运行时解包时刻」
+   → 改成**不依赖固定数字**的表述：
+
+   ```
+   > 实测仓库插件包 `miniapps/agaistock/src/agaistock/**` 的 24 个 `.pyc` 与宿主持久安装目录
+   > `~/.minimax/plugins/agaistock/src/agaistock/**` 的 24 个 `.pyc` **mtime 24/24 完全相同**
+   > （连亚秒都一致）⇒ 这批 `.pyc` **只能是宿主拷进去的**（`__pycache__` 是 gitignored 产物）。
+   > 至于「有多少个早于解包时刻」**随解包批次变化**（实测 19/24 ~ 24/24），
+   > **不要**把某个固定数字当证据 —— 决定性的是「mtime 逐个完全相同」这一条。
+   ```
+
+2. **同一段**里「仓库插件包、宿主持久安装目录、运行时解包副本**三处都没有 `data/` 目录**」
+   → 改成**可复现**的表述（目录在不在取决于当时有没有污染，**不能**当证据）：
+
+   ```
+   > **来源说明**：这 8 个 `data/chanlun/002378/*.json` 是**运行时写的** ——
+   > 判定依据是**内容与时间**：宿主 `context.dataDir` 下那 8 个 JSON 的 mtime
+   > （`2026-11-24T14:34Z` 一带）与仓库根 `data/chanlun/002378/` 下那 8 个
+   > （`2026-11-24T11:18Z` 一带）**不同** ⇒ 不是同一批拷过去的。
+   > ⚠️ **不要**用「某个目录在不在」当证据 —— 宿主**会连 `data/` 目录一起拷**
+   > （实测宿主的安装目录里出现过 `data/agaistock.db`，mtime 与「在包目录直跑内核」
+   > 写出的时刻同一秒）。publish 前跑 `python tools/clean-package-artifacts.py` 清理。
+   ```
+
+3. **计划 fix round 2 小节**顶部的横幅：把「两处盲区已补」改成
+   「**三处**盲区已补（默认内核工厂 / `start()` 局部 `dataDir` / **argv `--db` 通道**）」。
+
+4. **设计文档 §16.4**：那条「构建期直跑内核」的说明里也含「18 个早于解包时刻」，
+   一并改成第 1 条的表述（**两处同源，必须一起改**）。
+
+- [ ] **Step 3: 跑全量测试 + 加固后的变异脚本**
+
+```bash
+python -m unittest discover -s tests -t .
+node --test "miniapps/agaistock/test/*.test.mjs"
+node --check miniapps/agaistock/miniapp/node/server.mjs
+node tools\check-spec.mjs docs\superpowers\plans\2026-11-24-reviewer-layer-and-chanlun-reviewer.md --external docs\superpowers\specs\2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md --external docs\superpowers\specs\2026-11-24-stock-review-app-architecture.md
+```
+
+**封闭性验证（必做）**：
+
+```bash
+$env:AGAISTOCK_DATA_DIR='D:\ambient\host\data'; node --test "miniapps/agaistock/test/*.test.mjs"
+```
+
+预期**全绿**。
+
+**变异验证（必做）**：控制器会提供 `.tmp\task20-fix4\mutations.py`，
+它在本轮脚本基础上**补 9 组变异**（R7/R8/R9/R10/R11/R3/C3/R5/R6），
+并把 `E3`/`E4` 的正则锚点改成**语义化**的（评审方指出：排版一变就静默「跳过」，
+覆盖率无声下降）。
+
+**预期**：这 9 组对着**修复前**的实现必须**漏过**、对着**修复后**必须**捕获**。
+
+> 控制器已预验证过这个方案（`.tmp\task20-fix4\red_green.py`）：
+> **阶段 1（当前实现，无新断言）9 组全漏过**（R7/R8/R9/R10/R11/R3/C3/R5/R6，阴性对照 Z1 也正确报漏过）；
+> **阶段 2（加上新断言）0 组真实漏过**（只剩阴性对照 Z1）、**0 假捕获、0 跳过**。
+> 预验证过程中控制器修掉了自己脚本的两个真 bug：
+> ① `R5` 的正则锚点匹配不到实际排版（静默「跳过」⇒ 覆盖率无声下降）；
+> ② 护栏集合没包含新测试名 ⇒ R5 明明红了却被判成「假捕获」。
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add miniapps/agaistock/test/api.test.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md
+git commit -m "test: pin the kernel argv channel and make the evidence reproducible" -- miniapps/agaistock/test/api.test.mjs docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md
+```
+
+> **不要用 `git add -A`**（Global Constraint 14）。
+> 本轮**不改 `src/agaistock/**`、也不改 `server.mjs`**。
+
+---
+
 ---
 
 ## Appendix A: 常用命令速查
