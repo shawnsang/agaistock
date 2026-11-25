@@ -11569,6 +11569,183 @@ Windows 上**同一个目录**有多种拼法，字符串比较全部对不上�
 
 ---
 
+### Task 20 · fix round 11 — 给 `isPathInside` 的 `..` 判据补一条**真的能红的**回归护栏
+
+> **来源**：fix round 10 + Task 21 fix round 2 的 scoped 复审（`task-21-fix2-review.md`）——
+> **PASS-WITH-MINORS，0 Critical / 0 Important / 4 Minor / 3 Nit**。
+> 本轮只处理 **Minor-1**（**测试覆盖缺口**，**当前生产行为正确**）。
+
+**根因（不是实现错，是测试自证）**：现有护栏测试的 `..` 用例在**进测试之前**就被消解掉了 ——
+`miniapps/agaistock/test/api.test.mjs` 里用的是 `resolve(join(root, '..', ...))`，
+`path.resolve` 会把 `..` **化简掉** ⇒ 测试断言的其实是**化简后的路径**，
+`isPathInside` 里那三行判据（`server.mjs:177-180`：`relative()` / `isAbsolute(rel)` /
+`rel.split(/[\\/]+/).includes('..')`）**一条都没被钉住**。
+
+**控制器必须先独立复现**（不采信评审结论）：
+把 `isPathInside` 的判据换成**朴素前缀比较**（保留 `normalizePathSpelling`）⇒
+Node **81/81 全绿** ⇒ 确实漏过。
+
+**裁决**：**生产代码不动**（`..` 的判定本来就对），
+只补**直接调用导出函数**的用例，用例里的 `..` 必须是**字面量**，**不许先 `resolve()`**。
+
+- [ ] **Step 1: 补一条钉住 `..` 判据的测试**（`miniapps/agaistock/test/api.test.mjs`）
+
+  新增测试 `isPathInside resolves .. by path semantics, not by string prefix`，
+  **直接调用**生产代码导出的 `isPathInside(root, candidate)`（不经过 `start()`），
+  至少覆盖这五组（`..` 全部是**字面量拼接**，测试里**不出现** `resolve()`）：
+
+  | candidate | 期望 | 含义 |
+  |---|---|---|
+  | `root + '\\..\\evil\\x.db'` | `false` | 往上爬出根 ⇒ 在根**外** |
+  | `root + '\\data\\..\\..\\evil.db'` | `false` | 爬两级出根 ⇒ 在根**外** |
+  | `root + '\\sub\\..\\inside.db'` | `true` | 爬回根内 ⇒ 在根**内** |
+  | `root + '\\..\\' + basename(root) + '\\inside.db'` | `true` | 绕一圈回到根内 ⇒ 在根**内** |
+  | `root + '\\..\\evil\\x.db'`（**同一路径再测一次**） | `false` | 重复调用结果稳定（无副作用） |
+
+  > 朴素前缀比较会把第 1、2 组判成 `true`（**假阳性**：误拒合法路径），
+  > 而正确的路径语义判据判成 `false` ⇒ **这条测试能区分两者**。
+
+- [ ] **Step 2: 给 `start()` 的硬约束补一条 `..` 用例**（同文件）
+
+  `dbPath` 的语义要分开看：
+  - `dbPath = root + '\\sub\\..\\data\\agaistock.db'` ⇒ 化简后**在插件根内** ⇒ **必须拒绝**；
+  - `dbPath = root + '\\..\\evil\\agaistock.db'` ⇒ 化简后**在插件根外** ⇒ **必须放行**
+    （那是别的目录，不是插件目录）。
+
+  > 拒绝逻辑（`start()`）与 `isPathInside` 用**同一个**生产函数 ⇒ 不自证。
+
+- [ ] **Step 3: 验收 + 变异**
+
+  ```bash
+  node --test --test-reporter=tap "miniapps/agaistock/test/*.test.mjs"
+  cd miniapps\agaistock; node --test --test-reporter=tap "test/*.test.mjs"
+  node --check miniapps\agaistock\miniapp\node\server.mjs
+  ```
+
+  **变异验证（必做）**：
+  ① `isPathInside` 换成朴素前缀比较 ⇒ **必须捕获**（且失败的是**新加的那条** `..` 测试）；
+  ② 去掉 `normalizePathSpelling` ⇒ **必须捕获**（回归上一轮的护栏）；
+  ③ **阴性对照**：只改一条注释 ⇒ 必须漏过。
+
+- [ ] **Step 4: Commit**
+
+  ```bash
+  git add miniapps/agaistock docs/superpowers
+  git commit -m "test: pin the .. branch of the plugin-root path guard" -- <同样的路径>
+  ```
+
+---
+
+### Task 21 · fix round 3 — 把写事务的**契约**补严，并把「首次绑定代码」显式化
+
+> **来源**：同一份 scoped 复审（`task-21-fix2-review.md`）的 **Minor-2 / Minor-3 / Minor-4**
+> （外加两条相关 Nit）。本轮**不动**「查续接 + 落库」的写事务结构（fix round 2 已定稿）。
+
+#### Minor-2 ｜ `insert_observation` 内部的 `commit()` 打破 `write_transaction` 的原子性契约
+
+- **位置**：`src/agaistock/storage/db.py:197`（`conn.commit()`）、事务管理器 `db.py:92-115`。
+- **复现（评审探针 H1）**：`with write_transaction(conn): insert_observation(...); raise`
+  ⇒ 异常照抛，但**那行已经提交**，`rollback()` 撤不掉。
+- **当前无触发点**（`cli.py` 里 `insert_observation` 是 `with` 块的最后一句），
+  但这是**纸面保证**：以后在它后面加一句可能抛错的语句，就会「保存失败却留下半截记录」。
+- **裁决**：**提交权归事务管理器**。`insert_observation` 改成
+  **「本来就不在事务里才自己 commit」**（判断必须在 INSERT **之前**取 ——
+  INSERT 之后 `in_transaction` 会变成 `True`）。
+
+#### Minor-3 ｜ `write_transaction` 的「复用外层事务」分支既不回滚也不提交
+
+- **位置**：`src/agaistock/storage/db.py:103-106`。
+- **复现（评审探针 H2）**：调用方自己 `BEGIN IMMEDIATE` ⇒ 在 `with write_transaction(conn)`
+  里 insert 后抛错 ⇒ `conn.in_transaction` 仍是 `True` ⇒ **写锁还攥在手里**，
+  别的写者最多要干等 30 秒；那条 INSERT 还会随调用方后续的 `commit()` **意外落库**。
+- **裁决**：该分支**异常时也 `rollback()`**（释放锁、撤销本块的写入），
+  成功时**不提交**（提交权归外层调用方）。
+  docstring 必须写清**两条分支的语义差别**（Nit-2）。
+
+#### Minor-4 ｜ 「未绑定代码的标的」线程吸收并发到达的代码，归属由竞态决定
+
+- **位置**：`src/agaistock/storage/db.py:294-337`（`find_thread_head` 的 name 回落）、
+  `db.py:282-291`（`_thread_has_coded_version`）。
+- **复现（评审探针 P3，4 次）**：预置一条「只有简称、`symbol=''`」的线程，
+  再并发点评 `600519` / `002378` / `601318` ⇒ **没有任何一条线程混进两个不同代码**（安全），
+  但**哪一个代码被绑定是不确定的**（先到先得）。
+- **裁决**：**不改成「拒绝续接」** ——
+  拒绝会直接打断用户要的「同一只股票要有延续性」，也推翻 D48 定的
+  「模型后来才解析出代码 ⇒ 同一条线程」（`tests/test_cli.py` 有对应用例钉着）。
+  改为**把「首次绑定」显式化并可见**：
+  1. `db.thread_symbol(conn, thread_id)`：该线程**首次绑定**的代码 ——
+     按版本序取**第一个带代码的存活行**；没有 ⇒ `""`（仍是未绑定代码的标的）。
+  2. `cmd_review` 的 payload 回显 `thread_symbol` 与 `thread_pending`（是否还没绑定）。
+  3. `find_thread_head` 的 docstring 写明：**先到先得（first writer binds）**，
+     绑定一旦做出**不再改变**。
+  4. 回归测试钉住**不变量**：并发让不同代码到达一条未绑定代码的线程 ⇒
+     **任何一条线程都不得含两个不同代码**；未绑定代码的线程**只绑定一个**代码；
+     绑定后再查**仍是同一个**符号。
+  > **明确残留**（写进台账）：并发下「谁先绑定」仍由调度决定 ——
+  > 这是**先到先得**语义，不是缺陷；但**绑定结果稳定且可查**。
+
+#### 顺带修掉的两条 Nit
+
+- **Nit-1（重复配置）**：`connect()` 的 `timeout=30` **本身**就会把 `busy_timeout` 设成 30000
+  （实测），`db.py:88` 那句 `PRAGMA busy_timeout = 30000` 属冗余 ⇒ 删掉并留注释说明。
+- **Nit-3（测试语义易被误读）**：`tests/test_cli.py` 的竞争连接断言补一句注释 ——
+  `timeout=0.2` 的「被拒」是**探针式断言**，生产是**排队 30 秒后报 locked**。
+
+- [ ] **Step 1: 存储层三处改动**（`src/agaistock/storage/db.py`）
+
+  ① `connect()`：删掉冗余的 `PRAGMA busy_timeout`，加注释说明 `timeout=30` 已等价。
+  ② `insert_observation()`：**INSERT 之前**记住 `conn.in_transaction`；
+     只有「本来不在事务里」才 `conn.commit()`。
+  ③ `write_transaction()`：复用外层事务的分支改成
+     `try: yield conn / except: rollback + raise / else: 不提交`；
+     docstring 写清两条分支的语义差别。
+
+- [ ] **Step 2: 新增 `thread_symbol()` + payload 回显**（`db.py` + `src/agaistock/cli.py`）
+
+  ```python
+  def thread_symbol(conn, thread_id) -> str:
+      """该线程**首次绑定**的代码；还没绑定 ⇒ ''。"""
+  ```
+
+  `cmd_review` 的 payload 增加 `thread_symbol` 与 `thread_pending` 两个字段。
+
+- [ ] **Step 3: 补测试（四条）**
+
+  ① **原子性**：`with write_transaction(conn): insert_observation(...); raise`
+     ⇒ 异常后 `SELECT COUNT(*) FROM observations` 必须是 **0**。
+  ② **复用分支释放锁**：调用方自己 `BEGIN IMMEDIATE` ⇒ 在 `with write_transaction(conn)`
+     里 insert 后抛错 ⇒ 异常后 `conn.in_transaction` 必须是 **False**，
+     且那行**不在**库里。
+  ③ **绑定不变量**：并发让 `600519` / `002378` 同时到达一条未绑定代码的线程 ⇒
+     **没有任何线程含两个不同代码**；未绑定代码的线程**只绑定一个**；再查 `thread_symbol` **不变**。
+  ④ **payload 回显**：`cmd_review` 的 JSON 里 `thread_symbol` 有值、`thread_pending` 为 `False`
+     （已绑定时）。
+
+- [ ] **Step 4: 验收 + 变异**
+
+  ```bash
+  python -m unittest discover -s tests -t .
+  python tools/sync-kernel.py --check
+  ```
+
+  **变异验证（必做）**：
+  ① `insert_observation` 恢复**无条件** `commit()` ⇒ **必须捕获**；
+  ② `write_transaction` 复用分支去掉 `rollback` ⇒ **必须捕获**；
+  ③ `thread_symbol` 恒返回 `""` ⇒ **必须捕获**；
+  ④ **阴性对照**：只改一条注释 ⇒ 必须漏过。
+
+- [ ] **Step 5: Commit**
+
+  ```bash
+  git add src/agaistock miniapps/agaistock/src/agaistock tests docs/superpowers
+  git commit -m "fix: tighten the write-transaction contract and expose the thread symbol binding" -- <同样的路径>
+  ```
+
+  > **内核随包走**：改完 `src/agaistock/**` 必须先跑 `python tools/sync-kernel.py`，
+  > **两处必须一起提交**（D23）。
+
+---
+
 ## Appendix A: 常用命令速查
 
 ```bash
