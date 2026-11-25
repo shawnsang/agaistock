@@ -127,6 +127,15 @@ function todayIso() {
 
 const DIRECTION_LABEL = { bullish: '看多', bearish: '看空', neutral: '中性' };
 
+/** 时间戳 → 本地可读格式；解析不了就原样返回（不丢信息）。 */
+function formatTime(value) {
+  if (!value) return '';
+  const when = new Date(value);
+  return Number.isNaN(when.getTime())
+    ? String(value)
+    : when.toLocaleString('zh-CN', { hour12: false });
+}
+
 /**
  * 观察库表格行。
  *
@@ -141,18 +150,16 @@ export function renderObservationRows(items) {
   if (!Array.isArray(items) || items.length === 0) return '';
   return items.map(function (item) {
     const firstSeen = item.first_seen_at || item.created_at;
-    const when = firstSeen ? new Date(firstSeen) : null;
-    const timeText = when && !Number.isNaN(when.getTime())
-      ? when.toLocaleString('zh-CN', { hour12: false })
-      : (firstSeen || '');
+    const timeText = formatTime(firstSeen);
     const dir = 'dir-' + (item.direction || 'neutral');
     const label = DIRECTION_LABEL[item.direction] || item.direction || '中性';
     const evidence = Array.isArray(item.evidence) ? item.evidence : [];
     const invalidation = Array.isArray(item.invalidation) ? item.invalidation : [];
     const version = Number(item.version || 0);
     const versionText = version > 1 ? '第 ' + version + ' 版' : '初版';
+    // 「最近更新」用**同一个**时间格式 —— 混着原始 ISO 串会让人以为两列口径不同。
     const updated = item.created_at && item.created_at !== firstSeen
-      ? '<div class="sub">最近更新 ' + escapeHtml(item.created_at) + '</div>'
+      ? '<div class="sub">最近更新 ' + escapeHtml(formatTime(item.created_at)) + '</div>'
       : '';
     return '<tr>'
       + '<td class="num">' + escapeHtml(timeText) + updated + '</td>'
