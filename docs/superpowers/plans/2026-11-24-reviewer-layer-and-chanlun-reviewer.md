@@ -11419,6 +11419,156 @@ T21-Minor-2：第一次（--symbol ""）thread = obs_A  supersedes = None
 
 ---
 
+### Task 20 · fix round 10 — 关掉「路径**拼写变体**」这两条漏过（`\\?\` 扩展长度前缀 / UNC 前缀）
+
+> **来源**：fix round 9 + Task 21 fix round 1 的 scoped 复审（`task-21-fix1-review.md`）——
+> **PASS-WITH-MINORS，0 Critical / 0 Important / 2 Minor / 3 Nit**。
+> 本轮只处理 **Minor-2**：`\\?\` 扩展长度前缀与 UNC 前缀拼写仍绕过插件根护栏
+> （复审实测 PRE/POST **均**漏过 ⇒ fix round 7/8 的**既有**缺口，非 fix round 9 引入）。
+
+**控制器必须先独立复现**（不采信评审结论）：
+把 `server.mjs` 的 `dbPath = ''` 改成 `dbPath = '\\\\?\\' + PLUGIN_ROOT,`
+⇒ Node **79 条全绿** ⇒ 确实漏过。
+
+**根因**：护栏的判据是**字符串前缀比较**（`low !== root && !low.startsWith(root + sep)`）。
+Windows 上**同一个目录**有多种拼法，字符串比较全部对不上：
+
+| 拼写 | 指向 |
+|---|---|
+| `C:\path\to\plugin` | 本地盘符路径 |
+| `\\?\C:\path\to\plugin` | 扩展长度前缀（同一目录） |
+| `\\?\UNC\localhost\C$\path\to\plugin` | 扩展长度 + UNC（同一目录） |
+| `\\localhost\C$\path\to\plugin` | 回环管理共享（同一目录） |
+
+⇒ 护栏必须**先归一化拼写、再按路径语义比较**，而不是裸比字符串。
+
+- [ ] **Step 1: 生产代码里加一个「拼写归一化」的路径包含判定**（`miniapps/agaistock/miniapp/node/server.mjs`）
+
+  新增导出纯函数 `isPathInside(root, candidate)`：
+
+  1. 归一化拼写：剥掉 `\\?\` 扩展长度前缀（`\\?\UNC\server\share` ⇒ `\\server\share`）；
+     把**回环管理共享** `\\localhost\X$\...` / `\\127.0.0.1\X$\...` 映射回盘符 `X:\...`。
+  2. 用 `relative(root, candidate)` 做**包含**判定：相同 ⇒ 在里面；
+     `rel` 以 `..` 开头或 `rel` 是绝对路径 ⇒ 不在里面。
+     （`path.win32.relative` 本身**大小写不敏感**，顺带覆盖 fix round 9 的 M1。）
+
+- [ ] **Step 2: 把不变量从「测试约定」变成「运行时硬约束」**（`server.mjs` 的 `start()`）
+
+  插件根是**安装产物**（可能被重装覆盖、可能只读）；运行数据落它里面就是 Task 20 要消灭的事。
+  ⇒ `start()` 里算出 `dbPath` 之后：**若 `dbPath` 为空、或落在插件根之内 ⇒ 直接抛错**，
+  并给出可执行的提示（宿主必须给 `context.dataDir`）。
+  > 宿主的 `dataDir` 是 `~/.minimax/v2/plugin-data/...`，**不在**插件目录内 ⇒ 生产路径不受影响；
+  > `dbPath` 为空时内核会回落到 `<插件根>/data/agaistock.db` —— 那**也在**插件根内 ⇒ 同样必须拦。
+
+- [ ] **Step 3: 改护栏 + 补一条「拼写变体」测试**（`miniapps/agaistock/test/api.test.mjs`）
+
+  把插件根护栏从裸字符串比较换成 `isPathInside`；
+  **再补一条测试**：给 `\\?\` 前缀与 UNC 回环拼写的插件根路径，断言判据**仍然**判为「在插件根之下」。
+  > 这条测试**不能**自证 —— 判据是**生产代码**（Step 1），测试只是它的消费者；
+  > 变异探针把 `isPathInside` 的归一化改坏 ⇒ 这两条测试必须红。
+
+- [ ] **Step 4: 验收 + 变异**
+
+  ```bash
+  python -m unittest discover -s tests -t .
+  node --test --test-reporter=tap "miniapps/agaistock/test/*.test.mjs"
+  cd miniapps\agaistock; node --test --test-reporter=tap "test/*.test.mjs"
+  node --check miniapps\agaistock\miniapp\node\server.mjs
+  ```
+
+  **变异验证（必做）**：
+  ① `dbPath = '\\\\?\\' + PLUGIN_ROOT` ⇒ **必须捕获**（改前漏过、改后捕获 = 先红后绿）；
+  ② `dbPath = UNC 回环拼写` ⇒ **必须捕获**；
+  ③ `isPathInside` 去掉归一化 ⇒ **必须捕获**；
+  ④ `start()` 的硬约束被删 ⇒ **必须捕获**；
+  ⑤ **阴性对照**：只改一条注释 ⇒ 必须漏过。
+
+- [ ] **Step 5: Commit**
+
+  ```bash
+  git add miniapps/agaistock docs/superpowers
+  git commit -m "fix: normalize path spellings before the plugin-root guard" -- <同样的路径>
+  ```
+
+---
+
+### Task 21 · fix round 2 — 把「查续接 + 落库」放进 SQLite **写锁**，堵住并发误接
+
+> **来源**：同一份 scoped 复审（`task-21-fix1-review.md`）的 **Minor-1**。
+> 复审实测：并发 POST 的 distinct symbols `['','002378','600519']` **落进 1 条线程**；
+> PRE 无此回落路径 ⇒ fix round 1 **扩大**了既有的并发缺口（schema 无 UNIQUE、查询与插入之间无锁）。
+
+**根因**：`cmd_review` 里「`find_thread_head`（查续接）」与「`insert_observation`（落库）」
+之间**没有写锁**：两个进程各自读到同一个 head，各自以为自己是下一版 ⇒
+同名不同代码的观察被并进同一条线程，版本链还会分叉。
+
+**裁决**：把「查续接 + 落库」整体放进一个 SQLite **写事务**（`BEGIN IMMEDIATE`）——
+写锁在**第一句 SELECT 之前**就要拿到，否则两个进程仍会各自读到同一个 head。
+**点评运行（LLM，耗时）在事务之外** —— 写锁只覆盖毫秒级的查+写。
+
+- [ ] **Step 1: 存储层加写事务原语**（`src/agaistock/storage/db.py`）
+
+  - `connect()` 增加 `timeout=30`（写锁竞争时最多等 30 秒，而不是默认 5 秒就报 `database is locked`）。
+  - 新增 `write_transaction(conn)` 上下文管理器：`BEGIN IMMEDIATE`（已是事务则不重复 begin）
+    → 正常退出 `commit()`，异常 `rollback()`。
+
+- [ ] **Step 2: `cmd_review` 把「查续接 + 落库」放进写事务**（`src/agaistock/cli.py`）
+
+  ```python
+  with db.write_transaction(conn):
+      previous = (
+          None
+          if args.new_thread
+          else db.find_thread_head(
+              conn, observation.get("symbol", ""), observation.get("name", "")
+          )
+      )
+      if previous:
+          observation = continuation.merge_into_previous(previous, observation)
+      thread_id = (previous.get("thread_id") or previous["id"]) if previous else None
+      observation_id = db.insert_observation(
+          conn, observation,
+          supersedes_id=previous["id"] if previous else None,
+          thread_id=thread_id,
+      )
+  ```
+
+  > `insert_observation` 内部已经 `commit()` ⇒ 写锁在**落库那一刻**就释放，
+  > 后面的 `run_reviewers`（LLM 长耗时）**不在**事务里。
+
+- [ ] **Step 3: 补测试（三条，都要能观测到「锁真的在」）**
+
+  ① **写锁可观测**：连接 A 持有写事务时，连接 B 的 `BEGIN IMMEDIATE` 必须被拒（`database is locked`）。
+  ② **查续接时锁已持有**：在 `cmd_review` 的续接查询执行点，**另开一个连接**尝试拿写锁 ⇒ 必须被拒
+     ⇒ 证明「查续接」这一步已经在写事务里（不是查完才加锁）。
+  ③ **并发不误接**：先落一条**只有简称**的观察，再并发落一条**带代码**的同名观察
+     ⇒ 后者**不得**续接到那条线程（线程里已有带代码的存活版本 ⇒ 另一只标的）。
+
+- [ ] **Step 4: 验收 + 变异**
+
+  ```bash
+  python -m unittest discover -s tests -t .
+  python tools/sync-kernel.py --check
+  ```
+
+  **变异验证（必做）**：
+  ① `BEGIN IMMEDIATE` 换成 `BEGIN`（延迟事务，不拿写锁）⇒ **必须捕获**；
+  ② 整个 `write_transaction` 去掉（回到无锁）⇒ **必须捕获**；
+  ③ `write_transaction` 的 `rollback` 分支去掉 ⇒ **必须捕获**（或按实现调整判据）；
+  ④ **阴性对照**：只改一条注释 ⇒ 必须漏过。
+
+- [ ] **Step 5: Commit**
+
+  ```bash
+  git add src/agaistock miniapps/agaistock/src/agaistock tests docs/superpowers
+  git commit -m "fix: serialize continuation lookup and insert under a write lock" -- <同样的路径>
+  ```
+
+  > **内核随包走**：改完 `src/agaistock/**` 必须先跑 `python tools/sync-kernel.py`，
+  > **两处必须一起提交**（D23）。
+
+---
+
 ## Appendix A: 常用命令速查
 
 ```bash
