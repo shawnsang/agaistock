@@ -225,6 +225,41 @@ def _all_rows_with_rowid(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [_row_to_item(row, keep_rowid=True) for row in rows]
 
 
+def _thread_head_by_name(
+    conn: sqlite3.Connection, name: str
+) -> tuple[dict[str, Any] | None, str]:
+    """按 `name` 找线程头 + 线程根 id。
+
+    必须**唯一命中一条线程** —— 命中多条说明认不准，宁可不续接（宁可新开一条，
+    也别把新输入接到错的标的上）。唯一性按**线程**算：一条线程本来就有多个同名版本行。
+    """
+    rows = conn.execute(
+        """SELECT * FROM observations
+           WHERE name = ? AND deleted_at IS NULL
+           ORDER BY created_at DESC, rowid DESC""",
+        (name,),
+    ).fetchall()
+    if not rows:
+        return None, ""
+    threads = {row["thread_id"] or row["id"] for row in rows}
+    if len(threads) != 1:
+        return None, ""
+    thread_id = rows[0]["thread_id"] or rows[0]["id"]
+    return _row_to_item(rows[0]), thread_id
+
+
+def _thread_has_coded_version(conn: sqlite3.Connection, thread_id: str) -> bool:
+    """这条线程里有没有**带代码**的存活版本行。"""
+    row = conn.execute(
+        """SELECT 1 FROM observations
+           WHERE (thread_id = ? OR id = ?) AND deleted_at IS NULL
+             AND symbol IS NOT NULL AND TRIM(symbol) <> ''
+           LIMIT 1""",
+        (thread_id, thread_id),
+    ).fetchone()
+    return row is not None
+
+
 def find_thread_head(
     conn: sqlite3.Connection, symbol: str, name: str = ""
 ) -> dict[str, Any] | None:
@@ -233,8 +268,16 @@ def find_thread_head(
     `symbol` 为空时退回按 `name` 匹配（用户只说股票简称、模型没解析出代码），
     且**必须唯一命中一条线程** —— 命中多条线程说明认不准，宁可不续接（宁可新开一条，
     也别把新输入接到错的标的上）。唯一性按**线程**算：一条线程本来就有多个同名版本行。
+
+    `symbol` **有值但查不到**时同样退回按 `name` 匹配：这条观察当初可能是**只说简称**
+    记的（symbol 为空），后来模型才解析出代码 —— 不回落的话，同一只股票会裂成两条
+    线程（Task 21 复审 Minor-2；真实场景：「模型这次没解析出代码、下次解析出来了」）。
+
+    回落**只对「当初没记代码」的线程开放**：候选线程里只要有**带代码**的存活版本行，
+    就说明它是另一只标的（同名不同代码）—— 宁可不续接。
     """
     symbol = str(symbol or "").strip()
+    name = str(name or "").strip()
     if symbol:
         row = conn.execute(
             """SELECT * FROM observations
@@ -242,24 +285,25 @@ def find_thread_head(
                ORDER BY created_at DESC, rowid DESC LIMIT 1""",
             (symbol,),
         ).fetchone()
-        return _row_to_item(row) if row is not None else None
+        if row is not None:
+            return _row_to_item(row)
+        # symbol 分支落空：这条观察当初可能是**只说简称**记的（symbol 为空）。
+        # 不回落的话，「第一次没解析出代码、第二次解析出来了」会裂成两条线程
+        # （Task 21 复审 Minor-2）。name 为空则没有第二条路。
+        if not name:
+            return None
+        head, thread_id = _thread_head_by_name(conn, name)
+        if head is None:
+            return None
+        if _thread_has_coded_version(conn, thread_id):
+            # 同名但带代码 ⇒ 另一只标的。宁可新开一条，也别接错标的。
+            return None
+        return head
 
-    name = str(name or "").strip()
     if not name:
         return None
-    rows = conn.execute(
-        """SELECT * FROM observations
-           WHERE name = ? AND deleted_at IS NULL
-           ORDER BY created_at DESC, rowid DESC""",
-        (name,),
-    ).fetchall()
-    if not rows:
-        return None
-    # 唯一性按**线程**算，不是按行算 —— 一条线程本来就有多个同名版本行。
-    threads = {row["thread_id"] or row["id"] for row in rows}
-    if len(threads) != 1:
-        return None
-    return _row_to_item(rows[0])
+    head, _ = _thread_head_by_name(conn, name)
+    return head
 
 
 def resolve_thread_id(conn: sqlite3.Connection, observation_id: str) -> str | None:

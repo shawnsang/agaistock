@@ -308,9 +308,11 @@ def cmd_reviews(args) -> int:
                 print("未找到该观察。")
             return 0
         versions = _thread_history(conn, thread_id)
-        items = (
-            db.latest_reviews(conn, versions[-1]["observation_id"]) if versions else []
-        )
+        # `items` = **被请求的那一版**的点评（保持 Task 21 之前的语义，且与
+        # `observation_id` 一致）；**整条线程**的历史在 `versions` 里。
+        # 复审 Minor-1：原先这里装的是「线程最后一版」的点评 —— 请求 v1 却拿到 v2 的点评，
+        # 而没有任何测试钉住这个字段的语义。
+        items = db.latest_reviews(conn, args.observation_id) if versions else []
         payload = {
             "observation_id": args.observation_id,
             "thread_id": thread_id,

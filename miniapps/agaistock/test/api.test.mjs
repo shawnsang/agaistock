@@ -831,9 +831,14 @@ test('the kernel db path never falls back to the plugin dir', async () => {
   const value = dbValues[0];
   if (value) {
     const target = resolve(value);
+    // ⚠️ 插件根的比较必须**大小写不敏感**：Windows 上路径大小写不敏感，
+    // `PLUGIN_ROOT.toUpperCase()` 与插件根指的是**同一个目录** ——
+    // 大小写敏感的「等于插件根」会让这条变体整个溜过去
+    // （fix round 8 复审 M1；控制器已独立复现：改前 79/79 全绿 = 漏过）。
+    const root = pluginRoot.toLowerCase();
+    const low = target.toLowerCase();
     assert.ok(
-      target !== pluginRoot
-        && !target.toLowerCase().startsWith(pluginRoot.toLowerCase() + sep),
+      low !== root && !low.startsWith(root + sep),
       `没给 dbPath 时不许回落到插件目录，实际 ${value}`,
     );
   }
@@ -957,6 +962,12 @@ test('the kernel subprocess argv carries exactly the host db path', async () => 
   // argparse 对重复的 --db 取**最后一个**，只看第一个会被绕过；
   // 而且 `--db VALUE` / `--db=VALUE` / `--d VALUE` / `--d=VALUE` 四种写法等价，
   // 只认 standalone 的 `--db` token 会让另外三种整个溜过去。
+  // ⚠️ 本断言按 **argparse 的取值语义**判定，**不钉拼写** ——
+  // `--db V` / `--db=V` / `--d V` / `--d=VALUE` 四种写法对 argparse **等价**，
+  // 所以「同值改写」（`--db HOST` → `--db=HOST`）**不再被抓** —— 这是**有意为之**：
+  // 收集方式必须与被测解析器的语义一致，否则收集到的就不是内核真正会看到的值
+  // （fix round 8 复审 N1）。真实内核实测确认该改写语义无害。
+  // ⚠️ 别把「拼写」钉回去 —— 那会对 argparse 真正接受的形态误报。
   const dbValues = collectDbValues(captured[0].argv);
   assert.deepEqual(
     dbValues,

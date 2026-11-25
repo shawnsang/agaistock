@@ -402,6 +402,72 @@ class ContinuationCliTests(unittest.TestCase):
                 [first["observation_id"], second["observation_id"]],
             )
 
+    def test_reviews_items_belong_to_the_requested_version(self):
+        """`items` = **被请求的那一版**的点评（与 `observation_id` 一致）。
+
+        Task 21 复审 Minor-1：`items` 曾装「线程最后一版」的点评 ——
+        请求 v1 却拿到 v2 的点评，而 `payload.observation_id` 回显的是 v1 ⇒ 语义漂移。
+        整条线程的历史在 `versions` 里，那才是「线程历史」的位置。
+        """
+        from agaistock.storage import db
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            draft = self._draft(tmp, {
+                "symbol": "002378", "name": "章源钨业", "direction": "bullish",
+                "confidence": 0.7, "thesis": "钨价上涨",
+            })
+            first = self._review(tmp, db_path, draft)
+            second = self._review(tmp, db_path, draft)
+
+            # 给两版各落一条**可区分**的点评。
+            conn = db.connect(db_path)
+            db.insert_review(conn, first["observation_id"], {
+                "reviewer_id": "anchor-chanlun", "reviewer_version": "0.1.0",
+                "status": "ok", "ran_at": "2026-11-01T10:00:00+00:00",
+                "summary": "第一版点评",
+            })
+            db.insert_review(conn, second["observation_id"], {
+                "reviewer_id": "anchor-chanlun", "reviewer_version": "0.1.0",
+                "status": "ok", "ran_at": "2026-11-02T10:00:00+00:00",
+                "summary": "第二版点评",
+            })
+            conn.close()
+
+            payload = self._run(
+                ["reviews", first["observation_id"], "--db", str(db_path), "--json"], db_path
+            )
+            self.assertEqual(payload["observation_id"], first["observation_id"])
+            self.assertEqual(len(payload["items"]), 1)
+            self.assertEqual(payload["items"][0]["ran_at"], "2026-11-01T10:00:00+00:00")
+            self.assertEqual(payload["items"][0]["verdict"]["summary"], "第一版点评")
+            # 线程历史仍然完整：两版都在 `versions` 里。
+            self.assertEqual(len(payload["versions"]), 2)
+
+    def test_continuation_matches_by_name_when_the_symbol_appears_later(self):
+        """先按简称记、后来解析出代码 ⇒ 仍是**同一条线程**（Task 21 复审 Minor-2）。
+
+        真实场景：模型这次没解析出代码、下次解析出来了 —— 不能因此裂成两条记录。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "a.db"
+            draft = self._draft(tmp, {
+                "symbol": "002378", "name": "章源钨业", "direction": "bullish",
+                "confidence": 0.7, "thesis": "钨价上涨",
+            })
+            # 第一次：只有简称，没有代码。
+            first = self._run([
+                "review", "--symbol", "", "--name", "章源钨业",
+                "--text", "补充一句", "--observation-file", draft,
+                "--db", str(db_path), "--json",
+            ], db_path)
+            # 第二次：模型解析出了代码。
+            second = self._review(tmp, db_path, draft)
+            self.assertEqual(first["thread_id"], second["thread_id"])
+            self.assertEqual(second["version"], 2)
+            listing = self._run(["list", "--db", str(db_path), "--json"], db_path)
+            self.assertEqual(len(listing["items"]), 1, "同一条线程只能占一行")
+
     def test_review_payload_carries_the_previous_rounds(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "a.db"

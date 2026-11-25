@@ -11362,6 +11362,13 @@ T21-Minor-2：第一次（--symbol ""）thread = obs_A  supersedes = None
       # （Task 21 复审 Minor-2）。name 为空则没有第二条路。
       if not name:
           return None
+      head, thread_id = _thread_head_by_name(conn, name)
+      if head is None:
+          return None
+      if _thread_has_coded_version(conn, thread_id):
+          # 同名但带代码 ⇒ 另一只标的。宁可新开一条，也别接错标的。
+          return None
+      return head
   if not name:
       return None
   # …（name 分支：唯一性按**线程**算，命中多条线程就不续接）
@@ -11369,6 +11376,14 @@ T21-Minor-2：第一次（--symbol ""）thread = obs_A  supersedes = None
 
   **必须补两条测试**：① `find_thread_head(conn, "002378", "章源钨业")` 能命中
   symbol 为空、name 相同的那一行；② CLI 层「先无 symbol、后有 symbol ⇒ 同一线程、列表一行」。
+
+  > **回落只对「当初没记代码」的线程开放**（控制器实施时补的约束）：
+  > 候选线程里只要有**带代码**的存活版本行，就说明它是**另一只标的**（同名不同代码）
+  > ⇒ 不续接。这条守住本函数原有的原则 ——「宁可新开一条，也别把新输入接到错的标的上」。
+  > 它**不放宽**任何既有行为：`symbol` 为空的 name 分支（老行为）不受影响，
+  > 「同名不同代码」在修复前也是新开一条线程。
+  > **必须补第三条测试**：`find_thread_head(conn, "002378", "同名")` 在候选线程
+  > 带代码时必须返回 None。
 
 - [ ] **Step 3: 订正计划里 `raw_text` 的措辞（Nit-1）**
 
@@ -11388,7 +11403,9 @@ T21-Minor-2：第一次（--symbol ""）thread = obs_A  supersedes = None
   **变异验证（必做）**：
   ① `cmd_reviews` 的 `items` 恒为空 ⇒ 必须捕获；
   ② `cmd_reviews` 的 `items` 改成指向线程最后一版 ⇒ 必须捕获；
-  ③ `find_thread_head` 去掉「symbol 分支落空 ⇒ 回落 name 分支」⇒ 必须捕获。
+  ③ `find_thread_head` 去掉「symbol 分支落空 ⇒ 回落 name 分支」⇒ 必须捕获；
+  ④ `_thread_has_coded_version` 恒返回 False（同名不同代码也续接）⇒ 必须捕获；
+  ⑤ **阴性对照**：只改一条注释 ⇒ 必须漏过。
 
 - [ ] **Step 5: Commit**
 

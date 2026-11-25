@@ -324,6 +324,29 @@ class ObservationThreadTests(unittest.TestCase):
         self.assertIsNotNone(head)
         self.assertEqual(head["symbol"], "002378")
 
+    def test_find_thread_head_falls_back_to_name_when_the_symbol_branch_misses(self):
+        """symbol 分支落空时**回落 name 分支**（Task 21 复审 Minor-2）。
+
+        真实场景：「模型这次没解析出代码、下次解析出来了」——
+        先按简称记（symbol 为空）、后来解析出代码 ⇒ 仍应是**同一条线程**。
+        """
+        conn = make_conn()
+        db.insert_observation(conn, dict(OBSERVATION, symbol="", name="章源钨业"))
+        head = db.find_thread_head(conn, "002378", "章源钨业")
+        self.assertIsNotNone(head, "symbol 分支落空时必须回落 name 分支")
+        self.assertEqual(head["name"], "章源钨业")
+
+    def test_find_thread_head_refuses_to_fall_back_onto_a_coded_thread(self):
+        """同名但**另一个代码**的线程 ⇒ 不续接。
+
+        回落 name 分支只对「当初没记代码」的线程开放：候选线程里只要有**带代码**
+        的存活版本行，就说明它是另一只标的 —— 同名不同代码，宁可不续接
+        （宁可新开一条，也别把新输入接到错的标的上）。
+        """
+        conn = make_conn()
+        db.insert_observation(conn, dict(OBSERVATION, symbol="600519", name="同名"))
+        self.assertIsNone(db.find_thread_head(conn, "002378", "同名"))
+
     def test_find_thread_head_refuses_ambiguous_name_match(self):
         """同名命中多条 ⇒ 认不准，宁可不续接。"""
         conn = make_conn()
