@@ -8649,18 +8649,25 @@ git commit -m "fix: guard the host data dir wiring and make the kernel env herme
 > 0 Critical / 0 Important，但有 **3 个 Minor + 3 个 Nit**。
 > 控制器已独立复核每个结论（评审方的变异脚本在 `.tmp\task20-fix-review\`，控制器自己又跑了一轮）。
 
+> ⚠️ **本小节已被 fix round 6 补充**：本节新增的测试**直接调 `runKernel` 并写死 args**，
+> **从不经过默认内核工厂** ⇒ 工厂往 args 塞/改写 `--db` 这一层零护栏。
+> fix round 6 把 argv 断言补到**默认工厂那条路径**上（那里本来就抓到了 argv）。
+
 > **控制器已预验证本节**：本节的代码被抽到沙盒副本
 > （`.tmp\task20-fix2\sandbox\agaistock\`）**实跑过** —— 原型 58 条测试全绿；
 > 再打上 13 组变异（M8/M9/M14/M15/M16/C4 + 7 组额外回归形态），
 > **13 组全部被护栏捕获，且每组红的是护栏集合里的测试**（不是无关测试碰巧红）。
 > 实现时若测试名与本节写法一致，这套判据可直接复用。
 
-> ⚠️ **本小节已被 fix round 3/4/5 补充**：默认内核工厂、`start()` 局部 `dataDir`、
-> argv `--db` 通道（`handleRoute` 层）、**argv 拼接点（最后一公里）**四处盲区已补
-> （见下面 `### Task 20 · fix round 3` / `### fix round 4` / `### fix round 5` 小节）——
+> ⚠️ **本小节已被 fix round 3/4/5/6 补充**：默认内核工厂、`start()` 局部 `dataDir`、
+> argv `--db` 通道（`handleRoute` 层）、argv 拼接点（`runKernel` 层）、**默认工厂层的 argv**
+> 五处盲区已补（见下面 `### Task 20 · fix round 3` / `fix round 4` / `fix round 5` /
+> `fix round 6` 小节）——
 > **别照着本小节 Step 2e 的默认实现写法实现**（它没把 `deps.spawnFn` 透传下去）。
-> **断言要落在 `runKernel` 的 `spawnFn` 边界** —— 那里抓到的 argv 就是进程实际收到的参数，
-> 任何上游层（`handleRoute`、默认内核工厂、`runKernel` 自身）的动手脚都躲不掉。
+> **断言要落在「默认内核工厂 → `spawnFn`」这条路径上** ——
+> 它既是**生产路径**（宿主不传 `deps` 时走的就是它），
+> 又因为 `handleRoute` / 默认工厂 / `runKernel` 三层的路径参数**都在 `spawnFn` 边界汇聚**，
+> 一处断言同时覆盖三层。
 
 **Minor 1（headline）：fix round 1 的源码断言只锚定「调用点字面量存在」，没有验证数据流。**
 

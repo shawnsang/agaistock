@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import test from 'node:test';
 
 import { handleRoute, buildKernelEnv, kernelDbPath, runKernel, start } from '../miniapp/node/server.mjs';
@@ -451,6 +451,20 @@ test('the default kernel factory hands the host context to the kernel unchanged'
   assert.equal(captured[0].env.AGAISTOCK_DB, join(dataDir, 'agaistock.db'));
   assert.equal(captured[0].env.PYTHONPATH, join(pluginRoot, 'src'));
   assert.equal(captured[0].cwd, pluginRoot);
+  // ⚠️ **argv 也要断言** —— Python 侧 `_default_db()` 是 **argv 优先于 env**
+  //（src/agaistock/cli.py:26-32）⇒ env 对了不代表 DB 落点对。
+  // 这里是**默认内核工厂**这条路径（宿主不传 deps 时走的就是它），
+  // 所以工厂往 args 里塞/改写 `--db` 也必须被抓到。
+  // 收集 argv 里**所有** --db 的取值（argparse 取最后一个，只看第一个会被绕过）。
+  const dbValues = [];
+  captured[0].argv.forEach((value, index) => {
+    if (captured[0].argv[index - 1] === '--db') dbValues.push(value);
+  });
+  assert.deepEqual(
+    dbValues,
+    [join(dataDir, 'agaistock.db')],
+    `默认内核工厂递给内核的 --db 必须是宿主给的路径，实际 ${JSON.stringify(dbValues)}`,
+  );
 });
 
 test('start() keeps the observation file in the host data dir, not the plugin dir', async () => {
@@ -681,10 +695,14 @@ test('the kernel db path never falls back to the plugin dir', async () => {
   // ⚠️ 不能用 `!value.includes('agaistock')` —— 那依赖**仓库目录名恰好含该子串**，
   // 换个路径名（安装副本、CI 的临时目录）这条就形同虚设。
   // 判据是「**恰好等于插件根目录**才算回落」—— 与目录名无关。
-  assert.notEqual(
-    calls[0][dbIdx + 1],
-    join(import.meta.dirname, '..'),
-    `没给 dbPath 时不许回落到插件目录，实际 ${calls[0][dbIdx + 1]}`,
+  // ⚠️ 不能只排除「恰好等于插件根」—— 插件根**下面**的 agaistock.db 也要排除
+  // （那才是内核真正会写的那个文件）。
+  // 也不能用 `!value.includes('agaistock')` —— 那依赖**仓库目录名恰好含该子串**。
+  const pluginRoot = join(import.meta.dirname, '..');
+  const value = calls[0][dbIdx + 1];
+  assert.ok(
+    value !== pluginRoot && !value.startsWith(pluginRoot + sep),
+    `没给 dbPath 时不许回落到插件目录，实际 ${value}`,
   );
 });
 
