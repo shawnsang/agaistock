@@ -10981,7 +10981,7 @@ ALTER TABLE observations ADD COLUMN thread_id      TEXT;  -- 线程根行的 id�
 | `confidence` | 新的 > 0 才用新的，否则沿用旧的 | 代码库里 `0.0` 表示「未提供」（兜底关键词解析给 0.0） |
 | `evidence` | **并集**（按 text 去重，旧的在前、新的在后） | 「结合之前的分析」—— 依据是累积的 |
 | `invalidation` | **并集**（按文本去重） | 证伪条件是**用户自己的判断标准**；合并的是用户自己前后两次说的话，**不是点评师写的**（§2.2 硬约束不变：点评师仍然不自动写） |
-| `raw_text` | 用新的 | 旧的原文在版本链里逐版保留 |
+| `raw_text` | 新的优先，新的为空才回退旧的 | 旧的原文在版本链里逐版保留 |
 
 合并结果**不得**带回上一版的 `id` / `thread_id` / `supersedes_id` / `deleted_at` /
 `created_at` —— `id` 会被 `insert_observation` 当主键用（撞主键），
@@ -11206,6 +11206,200 @@ git commit -m "feat: continue the observation thread for the same symbol" -- <�
 > **两处必须一起提交**（D23）。
 
 ---
+---
+
+### Task 20 · fix round 9 — 关掉「插件根**大写变体**」这条漏过 + 补两处说明
+
+> **来源**：fix round 8 scoped 复审（`task-20-fix8-review.md`）——
+> **PASS-WITH-MINORS，0 Critical / 0 Important / 2 Minor / 3 Nit**。
+> 复审**独立复现**了 fix round 8 的三条核心命题（cwd 回归已闭合、env 通道已闭合、实现零改动），
+> 本轮只处理剩下的两条 Minor 与两条与仓库有关的 Nit。
+
+**控制器已独立复现 M1**（不采信评审结论）：
+把 `server.mjs` 的 `dbPath = ''` 改成 `dbPath = PLUGIN_ROOT.toUpperCase(),`
+⇒ Node **79 条全绿、0 条失败** ⇒ **确实漏过**。
+
+- [ ] **Step 1: 插件根的比较改成**大小写不敏感**（`miniapps/agaistock/test/api.test.mjs`）**
+
+  现在的判据：
+
+  ```javascript
+  if (value) {
+    const target = resolve(value);
+    assert.ok(
+      target !== pluginRoot                                            // ← 大小写敏感
+        && !target.toLowerCase().startsWith(pluginRoot.toLowerCase() + sep),
+      `没给 dbPath 时不许回落到插件目录，实际 ${value}`,
+    );
+  }
+  ```
+
+  改成：
+
+  ```javascript
+  if (value) {
+    const target = resolve(value);
+    // 插件根的比较必须**大小写不敏感**：Windows 上路径大小写不敏感，
+    // `PLUGIN_ROOT.toUpperCase()` 与插件根指的是**同一个目录** ——
+    // 大小写敏感的「等于插件根」会让这条变体整个溜过去（fix round 8 复审 M1）。
+    const root = pluginRoot.toLowerCase();
+    const low = target.toLowerCase();
+    assert.ok(
+      low !== root && !low.startsWith(root + sep),
+      `没给 dbPath 时不许回落到插件目录，实际 ${value}`,
+    );
+  }
+  ```
+
+  > **危害有界**（复审实测）：这条变体让内核拿到**插件目录本身**（不是目录下的文件），
+  > sqlite 打不开目录 ⇒ 内核调用失败（500/404），**不会**把运行产物写进安装目录。
+  > 但护栏自己声明的不变量（「没给 dbPath 时不许回落到插件目录」）没被强制 ⇒ 还是要修。
+
+- [ ] **Step 2: 补一句注释说明「这条按取值语义判定、**不**钉拼写」**（N1）**
+
+  第四条 argv 断言（`api.test.mjs` 里 `collectDbValues` 那条）本轮起按 **argparse 的取值语义**
+  判定 —— `--db V` 与 `--db=V` 对 argparse **等价**，所以**同值改写不再被抓**。
+  这是**有意为之**（护栏集合内部一致），但必须写明，否则下一个人会以为「同值改写也该被抓」
+  而把拼写钉加回去。
+
+- [ ] **Step 3: 订正 fix round 8 复审简报 §5 的 pre 期望表（M2）**
+
+  简报那张表把「fix round 7 的修复前（`1a81759`）」当成了「本轮的修复前（`974c4b0`）」：
+  内联 / 缩写 / 路由分派（追加族）恰恰是 **fix round 7 闭合掉**的那一族，
+  在 `974c4b0` 上**已经全部被捕获**；本轮真正开放的只有 **M3（按路由分派改写 env）** 一族。
+  ⇒ 表改成按族分列 + 写清 pre 基线。
+
+  > **代码与计划本身都没病**（计划 `:10766` 已把 round-7 的「修复前」限定为 `1a81759`，
+  > fix8 小节的「预期」也只写「全部 18 组**必须捕获**」）—— **病在简报表**。
+  > 但它是**评审口径**的错：照表验收会期待「18 组 pre 全漏过」，而实际只有 M3 一族开放。
+
+- [ ] **Step 4: 验收**
+
+  ```bash
+  python -m unittest discover -s tests -t .
+  node --test "miniapps/agaistock/test/*.test.mjs"
+  cd miniapps\agaistock; node --test "test/*.test.mjs"
+  node --check miniapps\agaistock\miniapp\node\server.mjs
+  ```
+
+  **变异验证（必做）**：`server.mjs` 的 `dbPath = ''` → `dbPath = PLUGIN_ROOT.toUpperCase(),`
+  ⇒ **必须捕获**（改前漏过、改后捕获 = 「先红后绿」）。
+
+---
+
+### Task 21 · fix round 1 — 钉死 `cmd_reviews` 的 `items` 契约 + 补上 name→symbol 的续接方向
+
+> **来源**：Task 21 scoped 复审（`task-21-review.md`）——
+> **PASS-WITH-MINORS，0 Critical / 0 Important / 3 Minor / 1 Nit**。
+> 复审方**自写** 22 条功能用例 + 15 组变异 + 14 组追加护栏探针 + 真实库副本上的真实内核实测，
+> 结论是**需求成立**；剩下的是两处**契约/边界**问题。
+
+**控制器已独立复现两条 Minor**（不采信评审结论）：
+
+```
+T21-Minor-1：payload.observation_id = v1（请求的是 v1）
+              payload.items 的 ran_at = v2 的   ⇒ items 与被请求的那一版不一致
+T21-Minor-2：第一次（--symbol ""）thread = obs_A  supersedes = None
+              第二次（--symbol 002378）thread = obs_B  supersedes = None
+              同一条线程？ False     列表行数 = 2  ⇒ 裂成两条线程
+```
+
+- [ ] **Step 1: `cmd_reviews` 的 `items` = **被请求的那一版**的点评（Minor-1）**
+
+  现在的实现（`src/agaistock/cli.py`）：
+
+  ```python
+  items = (
+      db.latest_reviews(conn, versions[-1]["observation_id"]) if versions else []
+  )
+  ```
+
+  ⇒ `payload.observation_id` 回显**被请求的那一版**，`payload.items` 装的是**线程最后一版**的点评。
+  Task 21 之前 `cmd_reviews <id>` 返回的就是**那一条**观察的点评 ⇒ 语义被悄悄改掉了，
+  而且**没有任何测试钉住它**（复审的 G11「items 恒为空」与 G13「items 指向被请求的那一版」
+  **双双漏过**）。
+
+  **裁决**：选复审的建议 (b) —— `items` = **被请求的那一版**的点评
+  （保持 Task 21 之前的语义，且与 `observation_id` 一致）；
+  **整条线程的历史仍然完整地放在 `versions` 里**（那才是「线程历史」的位置）。
+
+  ```python
+  # `items` = **被请求的那一版**的点评（保持 Task 21 之前的语义，且与
+  # `observation_id` 一致）；**整条线程**的历史在 `versions` 里。
+  # 复审 Minor-1：原先这里装的是「线程最后一版」的点评 —— 请求 v1 却拿到 v2 的点评，
+  # 而没有任何测试钉住这个字段的语义。
+  items = db.latest_reviews(conn, args.observation_id) if versions else []
+  ```
+
+  **必须补一条测试把它钉死**（否则下一个改它的人还是会悄悄改掉）：
+  给两版各插一条 `ran_at` 不同的 review ⇒ 断言 `items` 的 `ran_at` 是**被请求的那一版**的。
+
+- [ ] **Step 2: `find_thread_head` 在 symbol 分支落空时回落 name 分支（Minor-2）**
+
+  现在的实现（`src/agaistock/storage/db.py`）：
+
+  ```python
+  symbol = str(symbol or "").strip()
+  if symbol:
+      row = conn.execute(... WHERE symbol = ? ...).fetchone()
+      return _row_to_item(row) if row is not None else None   # ← 落空就直接返回
+  ```
+
+  ⇒ 先按简称记（symbol 为空）、之后按代码记同一家公司 ⇒ **裂成两条线程**。
+  这正好打在「模型这次没解析出代码、下次解析出来了」的真实场景上。
+
+  改成：
+
+  ```python
+  symbol = str(symbol or "").strip()
+  name = str(name or "").strip()
+  if symbol:
+      row = conn.execute(... WHERE symbol = ? ...).fetchone()
+      if row is not None:
+          return _row_to_item(row)
+      # symbol 分支落空：这条观察当初可能是**只说简称**记的（symbol 为空）。
+      # 不回落的话，「第一次没解析出代码、第二次解析出来了」会裂成两条线程
+      # （Task 21 复审 Minor-2）。name 为空则没有第二条路。
+      if not name:
+          return None
+  if not name:
+      return None
+  # …（name 分支：唯一性按**线程**算，命中多条线程就不续接）
+  ```
+
+  **必须补两条测试**：① `find_thread_head(conn, "002378", "章源钨业")` 能命中
+  symbol 为空、name 相同的那一行；② CLI 层「先无 symbol、后有 symbol ⇒ 同一线程、列表一行」。
+
+- [ ] **Step 3: 订正计划里 `raw_text` 的措辞（Nit-1）**
+
+  计划 §2 的合并表写的是「`raw_text` | **用新的**」；实现是「新的优先，新的为空才回退旧的」。
+  CLI 侧 `--text` 必填 ⇒ 行为等价；把**计划措辞**改成「新的优先，新的为空才回退旧的」，
+  让文档与代码一致（代码不动 —— 「必须用新的」这条意图已有护栏）。
+
+- [ ] **Step 4: 验收**
+
+  ```bash
+  python -m unittest discover -s tests -t .
+  node --test "miniapps/agaistock/test/*.test.mjs"
+  cd miniapps\agaistock; node --test "test/*.test.mjs"
+  python tools\sync-kernel.py --check
+  ```
+
+  **变异验证（必做）**：
+  ① `cmd_reviews` 的 `items` 恒为空 ⇒ 必须捕获；
+  ② `cmd_reviews` 的 `items` 改成指向线程最后一版 ⇒ 必须捕获；
+  ③ `find_thread_head` 去掉「symbol 分支落空 ⇒ 回落 name 分支」⇒ 必须捕获。
+
+- [ ] **Step 5: Commit**
+
+  ```bash
+  git add src/agaistock miniapps/agaistock/src/agaistock tests docs/superpowers
+  git commit -m "fix: pin the reviews contract and close the name-to-symbol gap" -- <同样的路径>
+  ```
+
+  > **内核随包走**：改完 `src/agaistock/**` 必须先跑 `python tools/sync-kernel.py`，
+  > **两处必须一起提交**（D23）。
+
 ---
 
 ## Appendix A: 常用命令速查
