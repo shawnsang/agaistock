@@ -8649,10 +8649,6 @@ git commit -m "fix: guard the host data dir wiring and make the kernel env herme
 > 0 Critical / 0 Important，但有 **3 个 Minor + 3 个 Nit**。
 > 控制器已独立复核每个结论（评审方的变异脚本在 `.tmp\task20-fix-review\`，控制器自己又跑了一轮）。
 
-> ⚠️ **本小节已被 fix round 6 补充**：本节新增的测试**直接调 `runKernel` 并写死 args**，
-> **从不经过默认内核工厂** ⇒ 工厂往 args 塞/改写 `--db` 这一层零护栏。
-> fix round 6 把 argv 断言补到**默认工厂那条路径**上（那里本来就抓到了 argv）。
-
 > **控制器已预验证本节**：本节的代码被抽到沙盒副本
 > （`.tmp\task20-fix2\sandbox\agaistock\`）**实跑过** —— 原型 58 条测试全绿；
 > 再打上 13 组变异（M8/M9/M14/M15/M16/C4 + 7 组额外回归形态），
@@ -9929,6 +9925,12 @@ git commit -m "test: pin the kernel argv channel and make the evidence reproduci
 > 控制器已**独立复现**（自己的变异脚本 + 真实跑 Python 内核 + 中性路径对照），
 > 结论与评审方一致。
 
+> ⚠️ **本小节已被 fix round 6/7 补充** —— 本小节新增的测试**直接调 `runKernel`、
+> 绕过了默认内核工厂** ⇒ 工厂层零护栏。
+> fix round 6 把 argv 断言补到**默认工厂那条路径**上；
+> fix round 7 又发现那条断言**只观测第一条路由**、且**只认 standalone 的 `--db`** ⇒
+> 两条都已补上（见下面 `### Task 20 · fix round 7` 小节）。
+
 **fix round 4 的那 6 条测试确实落地了** —— 评审方用**自写**脚本独立复现「先红后绿」：
 对着修复前 9 组 argv 通道变异**全部漏过**、对着修复后**全部转为捕获**，
 端到端探针（只换 `spawn`，真调 `start(context)` **不传 deps**）实测
@@ -9978,7 +9980,10 @@ argv: --db <host>\agaistock.db  --db <plugin>\agaistock.db
 **修法：把断言落到 `runKernel` 的 `spawnFn` 边界 —— 那里抓到的 argv 就是进程实际收到的参数。**
 
 这是**终态**：`runKernel` 是**唯一**产生 argv 的地方，
-任何上游层（`handleRoute`、默认内核工厂、`runKernel` 自身）的动手脚都躲不掉。
+断言落在 `spawnFn` 边界 —— 抓到的 argv 就是进程实际收到的参数；
+**前提是收集方式与 argparse 的语义一致**
+（`--db VALUE` / `--db=VALUE` / `--d VALUE` / `--d=VALUE` 四种写法等价，
+且重复出现时 argparse 取**最后一个**）。
 
 - 新增一条测试：用 fake `spawnFn` 调 `runKernel`，断言 **argv 里所有 `--db` 的取值
   恰好等于宿主给的 dbPath**（**收集全部** `--db`，不能只看第一个 —— `argparse` 取最后一个）。
@@ -10338,6 +10343,428 @@ $env:AGAISTOCK_DATA_DIR='D:\ambient\host\data'; node --test "miniapps/agaistock/
 ```bash
 git add miniapps/agaistock/test/api.test.mjs docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
 git commit -m "test: assert the kernel argv on the default factory path" -- miniapps/agaistock/test/api.test.mjs docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
+```
+
+> **不要用 `git add -A`**（Global Constraint 14）。
+> 本轮**不改 `server.mjs`、不改 `src/agaistock/**`**。
+
+---
+
+### Task 20 · fix round 7 — 让 argv 判据**按 argparse 语义**收 `--db`，并让默认工厂护栏**跑遍全部路由**
+
+> **来源**：Task 20 fix round 6 的 scoped 复审（verifier）—— **PASS-WITH-MINORS**（0 Critical），
+> 但有 **2 条 Important + 3 条 Minor + 3 条 Nit**。
+> 控制器已**独立复现全部**（自己的四态判据脚本 + **真实 Python 内核**端到端），
+> 结论与评审方一致 —— **I1 / I2 / M1 均成立**。
+
+**fix round 6 做对了一件重要事**：`handleRoute` / 默认工厂 / `runKernel` 三层的 argv
+**确实都在 `spawnFn` 边界汇聚**，round-5 那条 Important 闭合了
+（评审方与控制器各自独立复现「先红后绿」：修复前 F1/F2/F3/F4 全漏 → 修复后全捕获）。
+但**「一次堵住三层」这句话本身被反例变异直接证伪** —— 护栏收 `--db` 的方式**不完整**，
+且默认工厂那条护栏**只观测了一条路由**。
+
+---
+
+**Important 1（headline）：内联 `--db=VALUE` 形态逃过全部护栏。**
+
+三条 argv 断言都用**同一个 token 扫描法**收集 `--db` 的取值：
+
+```javascript
+captured[0].argv.forEach((value, index) => {
+  if (captured[0].argv[index - 1] === '--db') dbValues.push(value);
+});
+```
+
+它只认 **standalone token** `--db VALUE`。但 argparse **同样接受** `--db=VALUE`，
+且**同样 last-wins**（控制器实测：`standalone-then-inline` ⇒ 取内联那个）。
+
+控制器**独立复现**（4 组全漏过，68/68 全绿）：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| V1 | 默认工厂**追加内联** `--db=<插件目录>` | **exit 0 漏过** |
+| V2 | `runKernel` **追加内联** `--db=<插件目录>` | **exit 0 漏过** |
+| V3 | `handleRoute` 的 list **追加内联** `--db=<插件目录>` | **exit 0 漏过** |
+| V4 | `handleRoute` 的 review **追加内联** `--db=<插件目录>` | **exit 0 漏过** |
+
+**真实内核实测**（`start(context)` 不传 deps、真实 `spawn`、真实 Python 内核）：
+**DB 真落进插件包目录**、宿主 dataDir 里没有库 —— 危害与被堵住的 F1/R1 **完全相同**。
+
+**Important 2：默认工厂那条护栏只观测第一条路由。**
+
+该测试只发 `GET /api/observations`（list 路由）且只扫 `captured[0]`。
+只要变异**按路由分派**（例如只对 `args[0] === 'review'` 生效），
+它对 list 路由**完全不可见**。
+
+控制器**独立复现**（3 组全漏过，68/68 全绿）：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| V5 | 默认工厂**只对 review 路由**塞 standalone `--db` | **exit 0 漏过** |
+| V6 | 默认工厂**只对 review 路由**塞内联 `--db` | **exit 0 漏过** |
+| V7 | 默认工厂**只对非 list 路由**塞 standalone `--db` | **exit 0 漏过** |
+
+**真实内核实测**（`POST /api/review` 与 `GET /api/observations/:id/reviews` 两条路由各测一次）：
+**DB 真落进插件包目录**。
+
+**Minor 1：Minor 1 的新判据是裸字符串前缀比较，不是路径归一化比较。**
+`startsWith` 逐字符比、不做归一化 ⇒ **`/` 分隔**与**大小写差异**两种拼写都漏过
+（控制器 2 组全漏过）。round 5 复审建议过用 `resolve()`，本轮没被采纳。
+
+**Minor 2**：计划 Step 2 第 3 条的横幅**加在 fix round 2 小节**，
+真正该加的 **fix round 5 小节零标注**，且新横幅对 round-2 是**假陈述**。
+
+**Minor 3**：过度断言**仍活在测试文件里**（`api.test.mjs` 里那句
+「任何上游层的动手脚都躲不掉」）与计划 round-5 小节 —— 且被 I1 / I2 **证伪**。
+
+**Nit 1**：argv **前缀** `-S` / `-m agaistock.cli` 仍零护栏。
+**Nit 2**：`handleRoute` 的 `draftDir` 回落分支仍零护栏（此前所有草稿断言都**传了** `dataDir`）。
+**Nit 3**：控制器那份脚本的判据分不出「崩溃型捕获」，且**无 inline / 无路由分派**两类变异
+⇒ 「真实漏过 0 组」**不能**支持「argv 通道已钉住」这个更大的命题。
+
+---
+
+**新的关键事实（控制器用真实内核实测）—— argparse 的 `allow_abbrev` 默认为 `True`。**
+
+`src/agaistock/cli.py` 里四个子命令各有且只有一个 `--db` 选项
+（`review` / `listing` / `reviews_cmd` / `delete`），没有 `allow_abbrev=False`。
+⇒ **`--db` 有四种等价写法**，且重复出现时取**最后一个**：
+
+| 形态 | 例子 | 真实内核实测 |
+|---|---|---|
+| standalone | `--db VALUE` | 接受，DB 落在该路径 ✓ |
+| 内联 | `--db=VALUE` | 接受，DB 落在该路径 ✓ |
+| 缩写 standalone | `--d VALUE` | 接受，DB 落在该路径 ✓ |
+| 缩写内联 | `--d=VALUE` | 接受，DB 落在该路径 ✓ |
+| 非法写法 | `--database` / `--de` / `--dbx` / `--debit` | argparse **拒绝**（exit 2） |
+
+> ⚠️ 「缩写」是 argparse 的**前缀匹配**：只有 `--db` 的**前缀**（`d` / `db`）才是合法写法，
+> `--de` / `--dbx` 都不是。所以护栏要认的形态集合是**有限且精确**的四个。
+>
+> ⚠️ 顶层（子命令**之前**）用 `--d` 会被 argparse 拒绝 —— 缩写只在**子命令之后**生效。
+
+⇒ **护栏必须按 argparse 的语义收 `--db`，不能按字符串猜。**
+只认 standalone 的 `--db` ⇒ 另外三种形态整个溜过去；
+只认 `--db` / `--db=` ⇒ 缩写形态仍然溜过去。
+
+**修法（三处断言 + 一条新测试 + 判据归一化）**：
+
+- **Step 1**：加一个共享辅助函数 `collectDbValues(argv)` ——
+  按 argparse 语义收集 argv 里**全部**能设置 `--db` 的取值（四种形态）。
+  三处 argv 断言（默认工厂那条 / `every kernel call…` / `the kernel subprocess argv…`）
+  **全部改用它**。
+- **Step 2**：默认工厂那条测试**跑遍五条路由**，并对**每一次** spawn 断言 argv。
+- **Step 3**：Minor 1 的判据改用 `resolve()` 归一化 + `toLowerCase()`（Windows 大小写不敏感）。
+- **Step 4**：补 argv **前缀**断言（`-S` / `-m agaistock.cli`）。
+- **Step 5**：补 `draftDir` 回落分支的测试（**不传** `dataDir`）。
+- **Step 6**：文档订正（横幅**移到** fix round 5 小节；过度断言改掉；设计文档改成有边界的表述）。
+
+**Files:**
+- Modify: `miniapps/agaistock/test/api.test.mjs`
+- Modify: `docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md`
+- Modify: `docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md`
+
+> ⚠️ **本轮不改 `server.mjs`** —— 实现本身**正确**
+> （控制器在未改动实现上用真实内核实测：`cwd` / `PYTHONPATH` / `AGAISTOCK_*` / `--db`
+> 全部指向宿主给的值，插件目录干净）。
+> 本轮唯一的问题是护栏**收值方式**与**覆盖范围**。
+
+**Interfaces:**
+- Consumes: 无（只加断言 + 修判据 + 文档）
+- Produces: 无（对外契约不变）
+
+- [ ] **Step 1: 加 `collectDbValues` 辅助函数（`api.test.mjs`）**
+
+顶部 import 补 `resolve` 与 `dirname`：
+
+```javascript
+import { dirname, join, resolve, sep } from 'node:path';
+```
+
+在 `fakeKernel` 辅助函数之后加：
+
+```javascript
+/**
+ * 按 **argparse 的语义**收集 argv 里**所有**能设置 `--db` 的取值。
+ *
+ * argparse 默认 `allow_abbrev=True` ⇒ `--db` 有**四种**等价写法
+ * （控制器用真实内核实测过，见 fix round 7 小节）：
+ *   `--db VALUE`（standalone）、`--db=VALUE`（内联）、
+ *   `--d VALUE`（缩写 standalone）、`--d=VALUE`（缩写内联）。
+ * 重复出现时 argparse 取**最后一个** —— 所以要**收集全部**再逐个比对。
+ *
+ * ⚠️ `--database` / `--de` / `--dbx` / `--debit` 都会被 argparse **拒绝**
+ * （前缀不匹配），它们不是合法写法；护栏既不必认，也不能把它们当成 db 取值放过。
+ */
+const DB_OPTION_NAMES = new Set(['d', 'db']);
+
+function collectDbValues(argv) {
+  const values = [];
+  argv.forEach((value, index) => {
+    if (typeof value !== 'string' || !value.startsWith('--')) return;
+    const eq = value.indexOf('=');
+    const name = eq === -1 ? value.slice(2) : value.slice(2, eq);
+    if (!DB_OPTION_NAMES.has(name)) return;
+    if (eq === -1) {
+      if (index + 1 < argv.length) values.push(argv[index + 1]);
+    } else {
+      values.push(value.slice(eq + 1));
+    }
+  });
+  return values;
+}
+```
+
+- [ ] **Step 2: 默认工厂那条护栏**跑遍全部路由**（`api.test.mjs`）**
+
+把 `the default kernel factory hands the host context to the kernel unchanged`
+整条替换为：
+
+```javascript
+test('the default kernel factory hands the host context to the kernel unchanged', async () => {
+  // **不注入 createKernel** —— 宿主不传 deps 时走的就是这条生产路径。
+  // 上一轮的护栏全都绕开了它（它们自己注入 createKernel），
+  // 于是「默认实现把 dataDir 写回插件目录」这种变异能全绿通过（Important 1）。
+  // 这里只把 spawn 换成观测用的假 spawn，其余走**真实默认实现**。
+  const captured = [];
+  const fakeChild = {
+    stdout: { on() {} },
+    stderr: { on() {} },
+    kill() {},
+    on(event, handler) {
+      if (event === 'close') setImmediate(() => handler(0));
+    },
+  };
+  const { base, root: pluginRoot } = await makeScratchPluginRoot();
+  const dataDir = join(base, 'data');
+  await mkdir(dataDir, { recursive: true });
+  const context = {
+    dataDir,
+    pluginRoot,
+    listen: { port: 0, host: '127.0.0.1' },
+    signal: new AbortController().signal,
+  };
+  // ⚠️ **五条路由都要跑** —— 只跑第一条，**按路由分派**的变异就完全看不见
+  // （fix round 7 的 Important 2）。每条路由都必须真的调到内核。
+  const routes = [
+    ['GET', '/api/status'],
+    ['GET', '/api/observations'],
+    ['GET', '/api/observations/obs_1/reviews'],
+    ['POST', '/api/review'],
+    ['DELETE', '/api/observations/obs_1'],
+  ];
+  const handle = await start(context, {
+    spawnFn: (command, argv, options) => {
+      captured.push({ command, argv, env: options.env, cwd: options.cwd });
+      return fakeChild;
+    },
+  });
+  try {
+    for (const [method, path] of routes) {
+      const init = { method };
+      if (method === 'POST') {
+        init.headers = { 'content-type': 'application/json' };
+        init.body = JSON.stringify({ text: '章源钨业看多' });
+      }
+      await fetch(`http://127.0.0.1:${handle.port}${path}`, init);
+    }
+  } finally {
+    await handle.dispose();
+    await rm(base, { recursive: true, force: true });
+  }
+  assert.ok(
+    captured.length >= routes.length,
+    `生产路径必须每条路由都 spawn 了内核，实际 ${captured.length} 次`,
+  );
+  assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, dataDir);
+  assert.equal(captured[0].env.AGAISTOCK_DB, join(dataDir, 'agaistock.db'));
+  assert.equal(captured[0].env.PYTHONPATH, join(pluginRoot, 'src'));
+  assert.equal(captured[0].cwd, pluginRoot);
+  // ⚠️ **argv 也要断言** —— Python 侧 `_default_db()` 是 **argv 优先于 env**
+  //（src/agaistock/cli.py:26-32）⇒ env 对了不代表 DB 落点对。
+  // 这里是**默认内核工厂**这条路径（宿主不传 deps 时走的就是它），
+  // 所以工厂往 args 里塞/改写 `--db` 也必须被抓到。
+  //
+  // ⚠️ **每一次 spawn 都要断言**，不能只看 `captured[0]` ——
+  // 路由分派型变异（只对某条路由动手脚）对第一条路由完全不可见。
+  //
+  // ⚠️ 收集方式必须**按 argparse 的语义**：`--db VALUE` / `--db=VALUE` /
+  // `--d VALUE` / `--d=VALUE` 四种写法等价，且重复出现取最后一个。
+  const expectedDb = join(dataDir, 'agaistock.db');
+  captured.forEach((call, index) => {
+    const dbValues = collectDbValues(call.argv);
+    assert.deepEqual(
+      dbValues,
+      [expectedDb],
+      `第 ${index + 1} 次 spawn 的 --db 必须是宿主给的路径，实际 ${JSON.stringify(dbValues)}`,
+    );
+  });
+});
+```
+
+- [ ] **Step 3: 另外两条 argv 断言改用 `collectDbValues`（`api.test.mjs`）**
+
+`every kernel call carries the host db path` 的循环体改成：
+
+```javascript
+    for (const args of calls) {
+      const dbValues = collectDbValues(args);
+      assert.deepEqual(
+        dbValues,
+        [dbPath],
+        `--db 必须是宿主给的数据库路径：${JSON.stringify(args)}`,
+      );
+    }
+```
+
+`the kernel subprocess argv carries exactly the host db path` 的取值收集改成：
+
+```javascript
+  // 收集 argv 里**所有**能设置 --db 的取值 —— 不能只看第一个：
+  // argparse 对重复的 --db 取**最后一个**，只看第一个会被绕过；
+  // 而且 `--db VALUE` / `--db=VALUE` / `--d VALUE` / `--d=VALUE` 四种写法等价，
+  // 只认 standalone 的 `--db` token 会让另外三种整个溜过去。
+  const dbValues = collectDbValues(captured[0].argv);
+  assert.deepEqual(
+    dbValues,
+    [hostDb],
+    `argv 里必须只有一个 --db 且是宿主给的路径，实际 ${JSON.stringify(dbValues)}`,
+  );
+  // ⚠️ argv **前缀**也要断言 —— `-S` 是运行时的硬约束（editable 安装的
+  // meta-path finder 优先级高于 PYTHONPATH ⇒ 不加 `-S` 会命中仓库里那份内核），
+  // `-m agaistock.cli` 决定跑的是哪个模块。这两层此前零护栏。
+  assert.deepEqual(
+    captured[0].argv.slice(0, 3),
+    ['-S', '-m', 'agaistock.cli'],
+    `内核子进程必须以 python -S -m agaistock.cli 启动，实际 ${JSON.stringify(captured[0].argv.slice(0, 3))}`,
+  );
+```
+
+- [ ] **Step 4: 修 Minor 1 的判据**（`the kernel db path never falls back to the plugin dir`）
+
+```javascript
+  // ⚠️ 不能用 `!value.includes('agaistock')` —— 那依赖**仓库目录名恰好含该子串**，
+  // 换个路径名（安装副本、CI 的临时目录）这条就形同虚设。
+  // 判据是「**不在插件根目录之下**就算回落」—— 与目录名无关。
+  // ⚠️ 不能只排除「恰好等于插件根」—— 插件根**下面**的 agaistock.db 也要排除
+  // （那才是内核真正会写的那个文件）。
+  // ⚠️ 必须**归一化**再比：`/` 分隔与大小写差异在 Windows 上都指向同一个目录，
+  // 裸 `startsWith` 会漏掉这两种拼写。
+  const pluginRoot = resolve(join(import.meta.dirname, '..'));
+  const dbValues = collectDbValues(calls[0]);
+  assert.ok(dbValues.length > 0, '内核调用必须带 --db');
+  const value = dbValues[0];
+  const target = resolve(value || '.');
+  assert.ok(
+    target !== pluginRoot
+      && !target.toLowerCase().startsWith(pluginRoot.toLowerCase() + sep),
+    `没给 dbPath 时不许回落到插件目录，实际 ${value}`,
+  );
+```
+
+- [ ] **Step 5: 补 `draftDir` 回落分支的测试（`api.test.mjs`）**
+
+在 `the review draft follows the db path when no data dir is given` 之后加：
+
+```javascript
+test('the review draft never falls back to the plugin dir', async () => {
+  // handleRoute 的 `draftDir = dataDir || dirname(dbPath)` ——
+  // `dataDir` 为空时**必须**落在 dbPath 所在目录，**不能**回落到插件目录
+  // （那是安装产物，重装会被覆盖）。
+  // ⚠️ 此前所有草稿断言都**传了** dataDir ⇒ 这个回落分支零护栏。
+  const calls = [];
+  const kernel = async (args) => {
+    calls.push(args);
+    return { code: 0, stdout: '{"ok":true}', stderr: '' };
+  };
+  const base = await mkdtemp(join(tmpdir(), 'agaistock-draftfallback-'));
+  const dbDir = join(base, 'db');
+  await mkdir(dbDir, { recursive: true });
+  try {
+    const dbPath = join(dbDir, 'agaistock.db');
+    const response = new FakeResponse();
+    await handleRoute(
+      makeRequest('POST', '/api/review', {
+        text: '章源钨业看多',
+        observation: { symbol: '002378', thesis: 'x' },
+      }),
+      response,
+      { kernel, dbPath }, // ← 故意**不传** dataDir
+    );
+    assert.equal(response.statusCode, 200);
+    const idx = calls[0].indexOf('--observation-file');
+    assert.ok(idx >= 0, '结构化草稿必须经 --observation-file 传给内核');
+    assert.equal(
+      dirname(calls[0][idx + 1]),
+      dbDir,
+      `dataDir 为空时草稿必须落在 dbPath 所在目录，实际 ${calls[0][idx + 1]}`,
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+```
+
+- [ ] **Step 6: 文档订正**
+
+1. **计划 fix round 2 小节**：把 fix round 6 误加在那里的三行横幅
+   （「本小节已被 fix round 6 补充……」）**删掉**。
+2. **计划 fix round 5 小节**：在标题下**补上**那条横幅（措辞对 round 5 才是对的）——
+   「本小节**已被 fix round 6/7 补充** —— round 5 新增的测试**直接调 `runKernel`、
+   绕过了默认工厂** ⇒ 工厂层零护栏；round 6 把 argv 断言补到**默认工厂那条路径**上，
+   round 7 又发现该断言**只观测第一条路由**、且**只认 standalone 的 `--db`**
+   ⇒ 两条都已补上」。
+3. **计划 round-5 小节**里那句过度断言（「任何上游层……的动手脚都躲不掉」）
+   改成**有边界**的表述：「断言落在 `runKernel` 的 `spawnFn` 边界，
+   抓到的 argv 就是进程实际收到的参数；**前提是收集方式与 argparse 的语义一致**
+   （`--db VALUE` / `--db=VALUE` / `--d VALUE` / `--d=VALUE` 四种写法等价）」。
+4. **设计文档 §16.4**：把「一处断言同时覆盖三层」改成**有边界**的表述 ——
+   「三层（`handleRoute` / 默认内核工厂 / `runKernel`）的路径参数都在 `spawnFn` 边界汇聚，
+   所以**一处断言可以覆盖三层** —— **前提是**收集方式与 argparse 的语义一致，
+   **且**覆盖每一条路由（否则按路由分派的变异仍然看不见）；
+   **再往下的层**（解释器路径）尚无护栏」。
+5. **测试文件**里那句过度断言同步改成同样的有边界表述。
+
+- [ ] **Step 7: 跑全量测试 + 加固后的变异脚本**
+
+```bash
+python -m unittest discover -s tests -t .
+node --test "miniapps/agaistock/test/*.test.mjs"
+node --check miniapps/agaistock/miniapp/node/server.mjs
+node tools\check-spec.mjs docs\superpowers\plans\2026-11-24-reviewer-layer-and-chanlun-reviewer.md --external docs\superpowers\specs\2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md --external docs\superpowers\specs\2026-11-24-stock-review-app-architecture.md
+```
+
+**封闭性验证（必做）**：
+
+```bash
+$env:AGAISTOCK_DATA_DIR='D:\ambient\host\data'; node --test "miniapps/agaistock/test/*.test.mjs"
+```
+
+**中性路径验证（必做）**：复制到**不含 `agaistock` 子串**的目录 → 必须**仍然全绿**，
+且「dbPath 默认值 = 插件根下面的 `agaistock.db`」必须**被抓到**。
+
+**变异验证（必做）**：控制器已提供 `.tmp\task20-fix7\probe.py`，
+它带**四态判据**（captured / crash_cap / false_cap / missed），
+并新增**四类**此前没有的变异：
+
+| 组 | 变异 | 修复前 | 修复后 |
+|---|---|---|---|
+| I1 | 内联 `--db=VALUE`（默认工厂 / `runKernel` / `handleRoute` 三处各一组） | 漏过 | **必须捕获** |
+| I1 | 缩写 `--d VALUE` / `--d=VALUE` | 漏过 | **必须捕获** |
+| I2 | 按路由分派（只对 review / 只对非 list） | 漏过 | **必须捕获** |
+| M1 | 路径拼写变体（`/` 分隔 / 大写） | 漏过 | **必须捕获** |
+
+**预期**：这 11 组对着**修复前**的实现（`1a81759`）必须**漏过**、对着**修复后**必须**捕获**；
+阴性对照（只改注释）必须报**漏过**；**harness 自校验**（整文件 import 崩）必须报**假捕获**。
+
+> 控制器已预验证：修复前 **11 组全漏过**（68/68 全绿），
+> 且**真实内核实测**确认内联形态与路由分派形态都会让 **DB 真落进插件包目录**。
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add miniapps/agaistock/test/api.test.mjs docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
+git commit -m "test: collect --db by argparse semantics and cover every route" -- miniapps/agaistock/test/api.test.mjs docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
 ```
 
 > **不要用 `git add -A`**（Global Constraint 14）。
