@@ -355,6 +355,9 @@ export async function handleRoute(request, response, options = {}) {
         '--json',
       ];
       if (draftPath) args.push('--observation-file', draftPath);
+      // 「另开一条记录」：默认是**续接**同一标的的观察线程（内核版本链），
+      // 只有用户明确勾选时才另起一条独立记录。
+      if (body.newThread === true) args.push('--new-thread');
       const result = await kernel(args);
       if (result.code !== 0) {
         sendJson(response, 422, {

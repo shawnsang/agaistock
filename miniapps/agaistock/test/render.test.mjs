@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { renderReviews, renderScore, renderHorizon, renderObservationRows } from '../miniapp/client/render.mjs';
+import { renderReviews, renderScore, renderHorizon, renderObservationRows, renderReviewHistory } from '../miniapp/client/render.mjs';
 
 const REVIEW = {
   reviewer_id: 'anchor-chanlun',
@@ -145,4 +145,62 @@ test('renderObservationRows puts the kernel row id on the delete button', () => 
     { id: 'obs_1', created_at: '2026-11-24T07:00:00Z', symbol: '002378', thesis: 't' },
   ]);
   assert.match(html, /data-delete-observation="obs_1"/);
+});
+
+test('renderObservationRows shows the version of a continued observation', () => {
+  // Task 21：观察库一行 = 一个标的的一条持续观察，行上标「第 N 版」。
+  const html = renderObservationRows([
+    {
+      id: 'obs_2', created_at: '2026-11-25T07:00:00Z', first_seen_at: '2026-11-24T07:00:00Z',
+      symbol: '002378', name: '章源钨业', thesis: '产量翻倍确认', version: 2, version_count: 2,
+    },
+  ]);
+  assert.match(html, /第 2 版/);
+});
+
+test('renderObservationRows shows 初版 for a first-time observation', () => {
+  const html = renderObservationRows([
+    { id: 'obs_1', created_at: '2026-11-24T07:00:00Z', symbol: '002378', thesis: 't', version: 1 },
+  ]);
+  assert.match(html, /初版/);
+});
+
+test('renderObservationRows uses the first-seen time of the thread', () => {
+  const html = renderObservationRows([
+    {
+      id: 'obs_2', created_at: '2026-11-25T07:00:00Z', first_seen_at: '2026-11-24T07:00:00Z',
+      symbol: '002378', thesis: 't', version: 2,
+    },
+  ]);
+  assert.match(html, /2026/);
+  assert.match(html, /最近更新/);
+});
+
+test('renderReviewHistory renders the previous rounds', () => {
+  const html = renderReviewHistory([
+    {
+      observation_id: 'obs_1', version: 1, created_at: '2026-11-24T07:00:00Z',
+      reviews: [{ reviewer_id: 'anchor-chanlun', status: 'ok', findings: [], caveats: [] }],
+    },
+  ]);
+  assert.match(html, /前几轮的点评/);
+  assert.match(html, /第 1 版/);
+  assert.match(html, /anchor-chanlun/);
+});
+
+test('renderReviewHistory returns nothing when there is no history', () => {
+  assert.equal(renderReviewHistory([]), '');
+  assert.equal(renderReviewHistory(undefined), '');
+});
+
+test('renderHorizon marks a review date that is already due', () => {
+  // 观察期锚在**线程起点**：补记一条旧观察时结算日可能已经在过去，
+  // 不标出来用户会以为是系统算错了。
+  const html = renderHorizon({ tier: 'mid', review_at: '2020-01-02', rationale: 'x', checks: [] });
+  assert.match(html, /已到期/);
+});
+
+test('renderHorizon does not mark a future review date as due', () => {
+  const html = renderHorizon({ tier: 'mid', review_at: '2999-01-02', rationale: 'x', checks: [] });
+  assert.doesNotMatch(html, /已到期/);
 });

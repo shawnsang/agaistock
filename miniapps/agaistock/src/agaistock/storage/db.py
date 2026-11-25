@@ -4,6 +4,10 @@
   - 观察记录只追加不修改；修订走新版本行
   - 删除是软删除（deleted_at），不物理删除
   - reviews 每次运行都追加一行，读取时取每位 reviewer 最新一版
+
+**观察版本链**（Task 21）：同一标的的持续观察由多个版本行组成，
+用 `supersedes_id`（本版本取代谁）+ `thread_id`（线程根行 id）串起来。
+旧行永不改写 —— 合并的结果写在**新版本行**里。
 """
 from __future__ import annotations
 
@@ -29,7 +33,9 @@ CREATE TABLE IF NOT EXISTS observations (
     evidence_json TEXT,
     invalidation_json TEXT,
     raw_text      TEXT,
-    deleted_at    TEXT
+    deleted_at    TEXT,
+    supersedes_id TEXT,
+    thread_id     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
@@ -88,6 +94,8 @@ def migrate(conn: sqlite3.Connection) -> None:
 _MIGRATIONS = (
     ("observations", "evidence_json", "TEXT"),
     ("observations", "invalidation_json", "TEXT"),
+    ("observations", "supersedes_id", "TEXT"),
+    ("observations", "thread_id", "TEXT"),
 )
 
 
@@ -116,14 +124,26 @@ def _position_json(observation: dict[str, Any]) -> str:
     return json.dumps(raw, ensure_ascii=False)
 
 
-def insert_observation(conn: sqlite3.Connection, observation: dict[str, Any]) -> str:
+def insert_observation(
+    conn: sqlite3.Connection,
+    observation: dict[str, Any],
+    *,
+    supersedes_id: str | None = None,
+    thread_id: str | None = None,
+) -> str:
+    """落一条观察行。
+
+    `thread_id` 缺省时取本行 id —— 自己就是线程根；
+    `supersedes_id` 是本版本取代的那一行（第一版为 NULL）。
+    """
     obs_id = observation.get("id") or _new_id("obs")
+    thread = str(thread_id) if thread_id else obs_id
     conn.execute(
         """INSERT INTO observations
            (id, symbol, name, created_at, direction, thesis, confidence,
             timeframe, trigger, position_json, evidence_json, invalidation_json,
-            raw_text, deleted_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            raw_text, deleted_at, supersedes_id, thread_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             obs_id,
             observation.get("symbol", ""),
@@ -139,6 +159,8 @@ def insert_observation(conn: sqlite3.Connection, observation: dict[str, Any]) ->
             json.dumps(observation.get("invalidation") or [], ensure_ascii=False),
             observation.get("raw_text", ""),
             None,
+            supersedes_id,
+            thread,
         ),
     )
     conn.commit()
@@ -170,10 +192,167 @@ def list_observations(conn: sqlite3.Connection, include_deleted: bool = False) -
     return rows
 
 
+# ------------------------------------------------------------------
+# 观察版本链（Task 21）
+#
+# 一条「线程」= 一个标的一条持续观察，由若干版本行组成：
+#   第一版：supersedes_id IS NULL，thread_id = 自己的 id
+#   后续版：supersedes_id = 上一版的 id，thread_id = 线程根 id
+#
+# 旧行永不改写（append-only 不变量），合并结果写在**新版本行**里。
+# ------------------------------------------------------------------
+
+
+def _row_to_item(row: sqlite3.Row, keep_rowid: bool = False) -> dict[str, Any]:
+    """内核行 → 观察字典（JSON 列还原成列表）。"""
+    item = dict(row)
+    if not keep_rowid:
+        item.pop("_rowid", None)
+    item["evidence"] = _load_json_list(item.pop("evidence_json", None))
+    item["invalidation"] = _load_json_list(item.pop("invalidation_json", None))
+    return item
+
+
+def _all_rows_with_rowid(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """全部观察行（含软删），带内部 `_rowid` 用于确定插入顺序。
+
+    `created_at` 只到秒 —— 同一秒内连续落两行是常态，
+    所以「最新一版」必须靠 `rowid` 兜底排序，不能只看时间戳。
+    """
+    rows = conn.execute(
+        "SELECT rowid AS _rowid, * FROM observations ORDER BY created_at DESC, rowid DESC"
+    )
+    return [_row_to_item(row, keep_rowid=True) for row in rows]
+
+
+def find_thread_head(
+    conn: sqlite3.Connection, symbol: str, name: str = ""
+) -> dict[str, Any] | None:
+    """该标的的**最新存活版本**行；没有则 None。
+
+    `symbol` 为空时退回按 `name` 匹配（用户只说股票简称、模型没解析出代码），
+    且**必须唯一命中一条线程** —— 命中多条线程说明认不准，宁可不续接（宁可新开一条，
+    也别把新输入接到错的标的上）。唯一性按**线程**算：一条线程本来就有多个同名版本行。
+    """
+    symbol = str(symbol or "").strip()
+    if symbol:
+        row = conn.execute(
+            """SELECT * FROM observations
+               WHERE symbol = ? AND deleted_at IS NULL
+               ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+            (symbol,),
+        ).fetchone()
+        return _row_to_item(row) if row is not None else None
+
+    name = str(name or "").strip()
+    if not name:
+        return None
+    rows = conn.execute(
+        """SELECT * FROM observations
+           WHERE name = ? AND deleted_at IS NULL
+           ORDER BY created_at DESC, rowid DESC""",
+        (name,),
+    ).fetchall()
+    if not rows:
+        return None
+    # 唯一性按**线程**算，不是按行算 —— 一条线程本来就有多个同名版本行。
+    threads = {row["thread_id"] or row["id"] for row in rows}
+    if len(threads) != 1:
+        return None
+    return _row_to_item(rows[0])
+
+
+def resolve_thread_id(conn: sqlite3.Connection, observation_id: str) -> str | None:
+    """任意一行的 id → 它的线程根 id。
+
+    迁移前的老行 `thread_id` 是 NULL —— 那条行自己就是线程根。
+    """
+    row = conn.execute(
+        "SELECT id, thread_id FROM observations WHERE id = ?", (str(observation_id),)
+    ).fetchone()
+    if row is None:
+        return None
+    return row["thread_id"] or row["id"]
+
+
+def thread_versions(conn: sqlite3.Connection, thread_id: str) -> list[dict[str, Any]]:
+    """线程的全部版本行，按时间升序（第一版在前）。"""
+    rows = conn.execute(
+        """SELECT * FROM observations
+           WHERE thread_id = ? OR id = ?
+           ORDER BY created_at ASC, rowid ASC""",
+        (str(thread_id), str(thread_id)),
+    )
+    return [_row_to_item(row) for row in rows]
+
+
+def thread_started_at(conn: sqlite3.Connection, thread_id: str) -> str:
+    """线程第一版的 created_at —— 观察期的锚点。
+
+    锚在**线程起点**而不是「今天」：否则用户可以靠反复补充无限顺延结算日。
+    """
+    row = conn.execute(
+        """SELECT MIN(created_at) AS started FROM observations
+           WHERE thread_id = ? OR id = ?""",
+        (str(thread_id), str(thread_id)),
+    ).fetchone()
+    if row is None or not row["started"]:
+        return ""
+    return str(row["started"])
+
+
+def list_threads(conn: sqlite3.Connection, include_deleted: bool = False) -> list[dict]:
+    """每个线程一行（存活线程的头），带版本计数与首见时间。
+
+    常态下一个 symbol 一条线程 ⇒ 列表一个 symbol 一行；
+    只有显式开了第二条线程（`--new-thread`）时，同一 symbol 才会出现两行。
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in _all_rows_with_rowid(conn):
+        key = item.get("thread_id") or item["id"]
+        groups.setdefault(key, []).append(item)
+
+    heads: list[dict[str, Any]] = []
+    for key, versions in groups.items():
+        versions.sort(key=lambda r: (r.get("created_at") or "", r["_rowid"]))
+        head = dict(versions[-1])
+        if not include_deleted and head.get("deleted_at"):
+            continue
+        head["thread_id"] = key
+        head["version"] = len(versions)
+        head["version_count"] = len(versions)
+        head["first_seen_at"] = versions[0].get("created_at")
+        heads.append(head)
+
+    heads.sort(key=lambda r: (r.get("created_at") or "", r["_rowid"]), reverse=True)
+    for item in heads:
+        item.pop("_rowid", None)
+    return heads
+
+
 def soft_delete_observation(conn: sqlite3.Connection, observation_id: str) -> bool:
     cursor = conn.execute(
         "UPDATE observations SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
         (_now(), observation_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def soft_delete_thread(conn: sqlite3.Connection, observation_id: str) -> bool:
+    """软删**整条线程**的所有版本。
+
+    只删头是不够的：列表只显示存活线程头，上一版会「复活」成新线程头 ——
+    用户会看到一条「从没被删过」但内容变旧的记录。
+    `reviews` 记录**保留**（§7.1 的审计要求）。
+    """
+    thread_id = resolve_thread_id(conn, observation_id)
+    if thread_id is None:
+        return False
+    cursor = conn.execute(
+        """UPDATE observations SET deleted_at = ?
+           WHERE deleted_at IS NULL AND (thread_id = ? OR id = ?)""",
+        (_now(), thread_id, thread_id),
     )
     conn.commit()
     return cursor.rowcount > 0

@@ -4,6 +4,10 @@
   review  记录一条观察 → 跑点评师 → 落库 → 评分 → 观察期
   list    列出观察
   delete  软删除一条观察
+
+**观察续接**（Task 21）：同一标的的第二次输入**不新开一条记录** ——
+它并进同一条观察线程（append-only 版本链），观点取新、依据与证伪条件取并集、
+观察期锚定在线程起点（续接**绝不**顺延结算日）。
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from . import config, horizon as horizon_mod, scoring
+from . import config, continuation, horizon as horizon_mod, scoring
 from .llm import client as llm_client
 from .reviewers import engine as engine_mod
 from .reviewers import registry
@@ -135,13 +139,69 @@ def run_reviewers(ctx, reviewers):  # pragma: no cover - 便于测试打桩
     return engine_mod.run_reviewers([r["instance"] for r in reviewers], ctx)
 
 
+def _anchor_date(conn, thread_id: str) -> str:
+    """观察期锚点：线程第一版的创建**日期**（YYYY-MM-DD）。
+
+    `created_at` 存的是 UTC 时间戳 —— 直接取前 10 位会在跨时区的晚上差一天，
+    所以先转成本地日期再取日期部分。
+
+    锚在**线程起点**而不是「今天」：每次补充都从今天起算的话，
+    用户可以靠反复补充**无限顺延**结算日，到期校准就废了。
+    """
+    started = db.thread_started_at(conn, thread_id)
+    if not started:
+        return date.today().isoformat()
+    try:
+        moment = datetime.fromisoformat(started)
+    except ValueError:
+        return started[:10]
+    if moment.tzinfo is None:
+        return moment.date().isoformat()
+    return moment.astimezone().date().isoformat()
+
+
+def _thread_history(conn, thread_id: str) -> list[dict]:
+    """线程各版本的点评历史（按版本升序）。
+
+    `reviews` 用 **verdict 字典**（与 `cmd_review` 的 `reviews` 同形），
+    前端可以用同一个渲染函数画出每一轮。
+    """
+    entries = []
+    for index, row in enumerate(db.thread_versions(conn, thread_id), start=1):
+        entries.append({
+            "observation_id": row["id"],
+            "version": index,
+            "created_at": row.get("created_at"),
+            "reviews": [item["verdict"] for item in db.latest_reviews(conn, row["id"])],
+        })
+    return entries
+
+
 def cmd_review(args) -> int:
     conn = _open(args.db)
     try:
         observation = _load_structured_observation(
             args.observation_file, args.symbol, args.name, args.text
         )
-        observation_id = db.insert_observation(conn, observation)
+        # 续接：同一标的的**最新存活版本** —— 新输入并进同一条线程，
+        # 而不是新开一条互不相干的记录。
+        previous = (
+            None
+            if args.new_thread
+            else db.find_thread_head(
+                conn, observation.get("symbol", ""), observation.get("name", "")
+            )
+        )
+        if previous:
+            observation = continuation.merge_into_previous(previous, observation)
+        thread_id = (previous.get("thread_id") or previous["id"]) if previous else None
+        observation_id = db.insert_observation(
+            conn,
+            observation,
+            supersedes_id=previous["id"] if previous else None,
+            thread_id=thread_id,
+        )
+        thread_id = thread_id or observation_id
 
         reviewers = registry.load_reviewers()
         ctx = engine_mod.ReviewContext(
@@ -158,11 +218,29 @@ def cmd_review(args) -> int:
 
         weights = {r["id"]: float(r.get("weight", 1.0)) for r in reviewers}
         score = scoring.aggregate(verdicts, reviewer_weights=weights)
-        plan = horizon_mod.plan(observation, verdicts, start=date.today().isoformat())
+        # 观察期锚定在线程起点 —— 续接**绝不**顺延结算日。
+        start = (
+            _anchor_date(conn, thread_id)
+            if previous
+            else date.today().isoformat()
+        )
+        plan = horizon_mod.plan(observation, verdicts, start=start)
 
+        history = [
+            entry
+            for entry in _thread_history(conn, thread_id)
+            if entry["observation_id"] != observation_id
+        ]
+        version_count = len(history) + 1
         payload = {
             "observation_id": observation_id,
+            "thread_id": thread_id,
+            "version": version_count,
+            "version_count": version_count,
+            "supersedes_id": previous["id"] if previous else None,
+            "first_seen_at": db.thread_started_at(conn, thread_id),
             "reviews": saved,
+            "history": history,
             "score": score,
             "horizon": plan,
         }
@@ -170,6 +248,8 @@ def cmd_review(args) -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
             print(f"观察 {observation_id}：{observation['name']} {observation['symbol']}")
+            if previous:
+                print(f"（续接第 {version_count} 版，取代 {previous['id']}）")
             print(
                 f"评分 {score['total']:.1f} / 100"
                 f"（被审维度：{'、'.join(score['scored_dimensions']) or '无'}，"
@@ -189,14 +269,23 @@ def cmd_review(args) -> int:
 def cmd_list(args) -> int:
     conn = _open(args.db)
     try:
-        rows = db.list_observations(conn, include_deleted=args.include_deleted)
+        if args.all_versions:
+            rows = db.list_observations(conn, include_deleted=args.include_deleted)
+        else:
+            # 默认按**线程**返回：一个标的一条持续观察 = 一行。
+            rows = db.list_threads(conn, include_deleted=args.include_deleted)
         if args.json:
             # 带 ok/items 外壳：Mini App 前端读的是 data.items（见 Task 14 / Task 15）
             print(json.dumps({"ok": True, "items": rows}, ensure_ascii=False, indent=2))
         else:
             for row in rows:
                 marker = "（已删除）" if row.get("deleted_at") else ""
-                print(f"{row['id']}  {row.get('created_at')}  {row.get('name')} {row.get('symbol')}{marker}")
+                version = row.get("version")
+                version_text = f"第 {version} 版" if version else ""
+                print(
+                    f"{row['id']}  {row.get('created_at')}  "
+                    f"{row.get('name')} {row.get('symbol')} {version_text}{marker}"
+                )
         return 0
     finally:
         conn.close()
@@ -205,14 +294,36 @@ def cmd_list(args) -> int:
 def cmd_reviews(args) -> int:
     conn = _open(args.db)
     try:
-        items = db.latest_reviews(conn, args.observation_id)
-        payload = {"observation_id": args.observation_id, "items": items}
+        thread_id = db.resolve_thread_id(conn, args.observation_id)
+        if thread_id is None:
+            payload = {
+                "observation_id": args.observation_id,
+                "thread_id": None,
+                "items": [],
+                "versions": [],
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print("未找到该观察。")
+            return 0
+        versions = _thread_history(conn, thread_id)
+        items = (
+            db.latest_reviews(conn, versions[-1]["observation_id"]) if versions else []
+        )
+        payload = {
+            "observation_id": args.observation_id,
+            "thread_id": thread_id,
+            "items": items,
+            "versions": versions,
+        }
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
-            for item in items:
-                verdict = item.get("verdict") or {}
-                print(f"{item['reviewer_id']} [{item['status']}] {len(verdict.get('findings') or [])} 条发现")
+            for entry in versions:
+                print(f"第 {entry['version']} 版 {entry['observation_id']} {entry['created_at']}")
+                for item in entry["reviews"]:
+                    print(f"- {item['reviewer_id']} [{item['status']}] {len(item.get('findings') or [])} 条发现")
         return 0
     finally:
         conn.close()
@@ -221,7 +332,10 @@ def cmd_reviews(args) -> int:
 def cmd_delete(args) -> int:
     conn = _open(args.db)
     try:
-        ok = db.soft_delete_observation(conn, args.observation_id)
+        # 删**整条线程**：只删头的话，上一版会复活成新线程头 ——
+        # 用户会看到一条「从没被删过」但内容变旧的记录。
+        thread_id = db.resolve_thread_id(conn, args.observation_id)
+        ok = db.soft_delete_thread(conn, args.observation_id)
         if not ok:
             if args.json:
                 print(json.dumps({"ok": False, "id": args.observation_id}, ensure_ascii=False))
@@ -229,9 +343,12 @@ def cmd_delete(args) -> int:
                 print(f"未找到或已删除：{args.observation_id}", file=sys.stderr)
             return 1
         if args.json:
-            print(json.dumps({"ok": True, "id": args.observation_id}, ensure_ascii=False))
+            print(json.dumps(
+                {"ok": True, "id": args.observation_id, "thread_id": thread_id},
+                ensure_ascii=False,
+            ))
         else:
-            print(f"已软删除 {args.observation_id}（不参与评分与校准统计）")
+            print(f"已软删除 {args.observation_id} 及其所在观察线程的全部版本（不参与评分与校准统计）")
         return 0
     finally:
         conn.close()
@@ -274,6 +391,8 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--text", required=True)
     review.add_argument("--observation-file", default=None,
                         help="接入层解析出的结构化观察（JSON 文件）")
+    review.add_argument("--new-thread", action="store_true",
+                        help="不续接已有观察，另开一条独立记录（默认续接）")
     review.add_argument("--db", default=None)
     review.add_argument("--json", action="store_true")
     review.set_defaults(func=cmd_review)
@@ -281,6 +400,8 @@ def build_parser() -> argparse.ArgumentParser:
     listing = subparsers.add_parser("list", help="列出观察")
     listing.add_argument("--db", default=None)
     listing.add_argument("--include-deleted", action="store_true")
+    listing.add_argument("--all-versions", action="store_true",
+                         help="返回全部原始行（不按观察线程聚合）")
     listing.add_argument("--json", action="store_true")
     listing.set_defaults(func=cmd_list)
 

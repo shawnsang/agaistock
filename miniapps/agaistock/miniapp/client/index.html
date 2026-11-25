@@ -138,6 +138,26 @@
       .tag.dir-bullish { color: var(--mcode-danger); border-color: color-mix(in srgb, var(--mcode-danger) 35%, transparent); }
       .tag.dir-bearish { color: var(--mcode-success); border-color: color-mix(in srgb, var(--mcode-success) 35%, transparent); }
       .tag.dir-neutral { color: var(--mcode-text-muted); }
+      .tag.version-tag { font-variant-numeric: tabular-nums; }
+
+      .new-thread-toggle {
+        display: flex; align-items: center; gap: 7px; margin-top: 10px;
+        font-size: 12.5px; color: var(--mcode-text-muted); cursor: pointer;
+      }
+      .new-thread-toggle input { cursor: pointer; }
+
+      .history-title {
+        font-size: 12px; color: var(--mcode-text-muted); margin: 16px 0 6px;
+      }
+      details.review-round {
+        border: 1px solid var(--mcode-border); border-radius: 7px;
+        padding: 8px 12px; margin-bottom: 8px;
+      }
+      details.review-round > summary {
+        cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+      }
+      .round-label { font-weight: 600; }
+      details.review-round .reviewer { margin-top: 8px; }
 
       ul.evidence { list-style: none; padding: 0; margin: 4px 0 0; }
       ul.evidence li { padding: 4px 0; border-bottom: 1px dashed var(--mcode-border); font-size: 13px; }
@@ -244,6 +264,7 @@
         <div class="panel">
           <p class="muted">点评里的中枢、支撑压力与证伪位都是<b>后复权</b>口径的价位，与行情软件里的现价不能直接对照。</p>
           <div id="reviews-list"></div>
+          <div id="review-history"></div>
         </div>
       </section>
 
@@ -270,12 +291,13 @@
             <table>
               <thead>
                 <tr>
-                  <th scope="col">时间</th>
+                  <th scope="col">首次记录</th>
                   <th scope="col">标的</th>
                   <th scope="col">主张</th>
                   <th scope="col">方向</th>
                   <th scope="col">信心</th>
                   <th scope="col">证伪条件</th>
+                  <th scope="col">版本</th>
                   <th scope="col">操作</th>
                 </tr>
               </thead>
@@ -553,6 +575,10 @@
           }
 
           html += '<div class="row"><button id="save-btn" type="button">存进观察库</button></div>';
+          html += '<label class="new-thread-toggle"><input type="checkbox" id="new-thread-check" /> '
+            + '另开一条记录（不续接这条标的之前的观察）</label>';
+          html += '<p class="muted">默认<b>续接</b>：同一只股票再记一次，会并进原来那条观察 —— '
+            + '观点按新的更新，依据和证伪条件累加，点评历史一起留着，结算日不顺延。</p>';
 
           cardPanel.innerHTML = html;
           cardSection.hidden = false;
@@ -561,6 +587,7 @@
           if (saveBtn) {
             saveBtn.addEventListener('click', async function () {
               saveBtn.disabled = true;
+              var newThreadBox = document.getElementById('new-thread-check');
               // 保存并点评（草稿变量是 currentDraft）
               var payload = {
                 symbol: (currentDraft && currentDraft.symbol) || '',
@@ -568,7 +595,9 @@
                 text: rawText.value,
                 // 把接入层解析出的结构化观察一起送过去 —— 内核要靠它落库用户的
                 // 依据、证伪条件和信心，否则这些信息在这里就丢了。
-                observation: currentDraft || null
+                observation: currentDraft || null,
+                // 勾选才另开一条；默认续接同一条观察线程。
+                newThread: Boolean(newThreadBox && newThreadBox.checked)
               };
               setStatus(recordStatus, '正在保存并点评，可能要等一会儿…', 'warn');
               try {
@@ -590,12 +619,19 @@
                   return;
                 }
                 document.getElementById('reviews-list').innerHTML = r.renderReviews(data.reviews || []);
+                var historyBox = document.getElementById('review-history');
+                if (historyBox) {
+                  historyBox.innerHTML = (r.renderReviewHistory
+                    ? r.renderReviewHistory(data.history || [])
+                    : '');
+                }
                 document.getElementById('score-body').innerHTML = r.renderScore(data.score);
                 document.getElementById('horizon-body').innerHTML = r.renderHorizon(data.horizon);
                 document.getElementById('reviews-section').hidden = false;
                 document.getElementById('score-section').hidden = false;
                 document.getElementById('horizon-section').hidden = false;
-                setStatus(recordStatus, '已保存并完成点评，观察 ' + (data.observation_id || '') + '。', 'ok');
+                var versionText = data.version ? '（第 ' + data.version + ' 版）' : '';
+                setStatus(recordStatus, '已保存并完成点评' + versionText + '，观察 ' + (data.observation_id || '') + '。', 'ok');
                 loadObservations();
               } catch (e) {
                 setStatus(recordStatus, '点评失败。', 'error');
@@ -701,6 +737,9 @@
           rawText.value = '';
           currentDraft = null;
           cardPanel.innerHTML = '';
+          document.getElementById('reviews-list').innerHTML = '';
+          var historyBox = document.getElementById('review-history');
+          if (historyBox) historyBox.innerHTML = '';
           document.getElementById('reviews-section').hidden = true;
           document.getElementById('score-section').hidden = true;
           document.getElementById('horizon-section').hidden = true;

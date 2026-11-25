@@ -182,6 +182,51 @@ test('POST /api/review forwards the structured observation to the kernel', async
   assert.ok(args.includes('--observation-file'), '必须把结构化观察传给内核');
 });
 
+test('POST /api/review continues the thread by default', async () => {
+  // 默认**续接**：不传 --new-thread，内核就会把新输入并进同一条观察线程。
+  const response = new FakeResponse();
+  const kernel = fakeKernel({ observation_id: 'obs_9', reviews: [], score: {}, horizon: {} });
+  await handleRoute(
+    makeRequest('POST', '/api/review', { symbol: '002378', name: '章源钨业', text: '还能拿半年' }),
+    response,
+    { kernel, dbPath: 'test.db' },
+  );
+  assert.equal(response.statusCode, 200);
+  assert.ok(
+    !kernel.calls[0].includes('--new-thread'),
+    '默认必须续接，不能传 --new-thread',
+  );
+});
+
+test('POST /api/review forwards --new-thread when the user asks for a separate record', async () => {
+  const response = new FakeResponse();
+  const kernel = fakeKernel({ observation_id: 'obs_9', reviews: [], score: {}, horizon: {} });
+  await handleRoute(
+    makeRequest('POST', '/api/review', {
+      symbol: '002378', name: '章源钨业', text: '换个角度再看一次', newThread: true,
+    }),
+    response,
+    { kernel, dbPath: 'test.db' },
+  );
+  assert.equal(response.statusCode, 200);
+  assert.ok(kernel.calls[0].includes('--new-thread'), '勾选「另开一条记录」必须传 --new-thread');
+});
+
+test('POST /api/review ignores a truthy-but-not-boolean newThread', async () => {
+  // 只有真正的 true 才另开一条记录：'false' / 1 / 'yes' 都不能被当成勾选。
+  const response = new FakeResponse();
+  const kernel = fakeKernel({ observation_id: 'obs_9', reviews: [], score: {}, horizon: {} });
+  await handleRoute(
+    makeRequest('POST', '/api/review', {
+      symbol: '002378', name: '章源钨业', text: 't', newThread: 'false',
+    }),
+    response,
+    { kernel, dbPath: 'test.db' },
+  );
+  assert.equal(response.statusCode, 200);
+  assert.ok(!kernel.calls[0].includes('--new-thread'));
+});
+
 test('POST /api/review returns 422 when kernel fails', async () => {
   const response = new FakeResponse();
   const kernel = async () => ({ code: 1, stdout: '', stderr: 'boom' });
@@ -193,7 +238,6 @@ test('POST /api/review returns 422 when kernel fails', async () => {
   assert.equal(response.statusCode, 422);
   assert.equal(response.json().ok, false);
 });
-
 test('GET /api/observations returns the ok/items envelope the front-end reads', async () => {
   const response = new FakeResponse();
   const kernel = fakeKernel({

@@ -102,13 +102,27 @@ export function renderHorizon(plan) {
       <span>${escapeHtml(c.desc)}</span>
       ${c.rationale ? `<div class="muted check-rationale">${escapeHtml(c.rationale)}</div>` : ''}
     </li>`).join('');
+  // 结算日落在今天之前 ⇒ 已经到期。
+  // 观察期锚在**线程起点**，所以补记一条旧观察时看到的日期可能已经在过去 ——
+  // 不标出来，用户会以为是系统算错了。
+  const reviewAt = plan.review_at || '';
+  const overdue = Boolean(reviewAt) && reviewAt < todayIso();
   return `
     <div class="horizon-main">
-      <strong>${escapeHtml(plan.review_at)}</strong>
+      <strong>${escapeHtml(reviewAt)}</strong>
       <span class="muted">（档位 ${escapeHtml(plan.tier || '默认')}）</span>
+      ${overdue ? '<span class="badge-failed">已到期</span>' : ''}
     </div>
     <p class="muted">${escapeHtml(plan.rationale || '')}</p>
     ${checks ? `<div class="horizon-checks"><h4>到期检查项</h4><ul>${checks}</ul></div>` : ''}`;
+}
+
+function todayIso() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 const DIRECTION_LABEL = { bullish: '看多', bearish: '看空', neutral: '中性' };
@@ -118,21 +132,30 @@ const DIRECTION_LABEL = { bullish: '看多', bearish: '看空', neutral: '中性
  *
  * 入参是**内核行**（Task 14 之后 /api/observations 走内核 list --json）：
  * id / created_at / symbol / name / direction / thesis / confidence。
- * 删除按钮把内核行 id 放在 data-delete-observation 上，由 index.html 事件委托取出。
+ * Task 21 之后内核默认按**观察线程**返回 —— 一个标的一条持续观察 = 一行，
+ * 行上还带 `version`（第几版）/ `version_count` / `first_seen_at`。
+ * 删除按钮把内核行 id 放在 data-delete-observation 上，由 index.html 事件委托取出；
+ * 内核按它把**整条线程**软删。
  */
 export function renderObservationRows(items) {
   if (!Array.isArray(items) || items.length === 0) return '';
   return items.map(function (item) {
-    const when = item.created_at ? new Date(item.created_at) : null;
+    const firstSeen = item.first_seen_at || item.created_at;
+    const when = firstSeen ? new Date(firstSeen) : null;
     const timeText = when && !Number.isNaN(when.getTime())
       ? when.toLocaleString('zh-CN', { hour12: false })
-      : (item.created_at || '');
+      : (firstSeen || '');
     const dir = 'dir-' + (item.direction || 'neutral');
     const label = DIRECTION_LABEL[item.direction] || item.direction || '中性';
     const evidence = Array.isArray(item.evidence) ? item.evidence : [];
     const invalidation = Array.isArray(item.invalidation) ? item.invalidation : [];
+    const version = Number(item.version || 0);
+    const versionText = version > 1 ? '第 ' + version + ' 版' : '初版';
+    const updated = item.created_at && item.created_at !== firstSeen
+      ? '<div class="sub">最近更新 ' + escapeHtml(item.created_at) + '</div>'
+      : '';
     return '<tr>'
-      + '<td class="num">' + escapeHtml(timeText) + '</td>'
+      + '<td class="num">' + escapeHtml(timeText) + updated + '</td>'
       + '<td class="num">' + escapeHtml((item.symbol || '—') + (item.name ? ' ' + item.name : '')) + '</td>'
       + '<td>' + escapeHtml(item.thesis || '（未提取）')
       + (evidence.length ? '<div class="sub">依据 ' + evidence.length + ' 条</div>' : '')
@@ -142,15 +165,50 @@ export function renderObservationRows(items) {
       + '<td>' + (invalidation.length
           ? escapeHtml(invalidation.join('；'))
           : '<span style="color:var(--mcode-warning)">缺失</span>') + '</td>'
+      + '<td><span class="tag version-tag">' + escapeHtml(versionText) + '</span></td>'
       + '<td><button type="button" class="ghost small" data-delete-observation="'
         + escapeHtml(item.id || '') + '">删除</button></td>'
       + '</tr>';
   }).join('');
 }
 
+/**
+ * 前几轮的点评（Task 21）。
+ *
+ * 续接把新输入并进同一条观察线程，历史点评因此可以一并显示 ——
+ * 用户能看到「上一轮点评师说了什么、这一轮改了什么」。
+ */
+export function renderReviewHistory(history) {
+  if (!Array.isArray(history) || history.length === 0) return '';
+  const rounds = history.map(function (entry) {
+    const reviews = Array.isArray(entry.reviews) ? entry.reviews : [];
+    const when = entry.created_at ? new Date(entry.created_at) : null;
+    const timeText = when && !Number.isNaN(when.getTime())
+      ? when.toLocaleString('zh-CN', { hour12: false })
+      : (entry.created_at || '');
+    return '<details class="review-round">'
+      + '<summary>'
+      + '<span class="round-label">第 ' + escapeHtml(entry.version || '?') + ' 版</span>'
+      + '<span class="muted">' + escapeHtml(timeText) + '</span>'
+      + '<span class="reviewer-count">' + reviews.length + ' 位点评师</span>'
+      + '</summary>'
+      + (reviews.length
+          ? renderReviews(reviews)
+          : '<p class="muted">这一轮没有点评结论。</p>')
+      + '</details>';
+  }).join('');
+  return '<h3 class="history-title">前几轮的点评</h3>' + rounds;
+}
+
 // 供 index.html 的主脚本调用（module 脚本是 deferred，用户点击时必定已就绪）。
 // Node 里没有 window —— 直接赋值会让 import 该模块的测试在第一条用例前就抛
 // ReferenceError，所以必须先判断。
 if (typeof window !== 'undefined') {
-  window.agaistockRender = { renderReviews, renderScore, renderHorizon, renderObservationRows };
+  window.agaistockRender = {
+    renderReviews,
+    renderScore,
+    renderHorizon,
+    renderObservationRows,
+    renderReviewHistory,
+  };
 }
