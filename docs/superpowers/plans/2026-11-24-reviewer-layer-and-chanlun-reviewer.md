@@ -10153,6 +10153,191 @@ git commit -m "test: pin the kernel argv seam and make the fallback guard path-i
 
 ---
 
+### Task 20 · fix round 6 — 把 argv 断言补到**默认内核工厂**那条路径（终态）
+
+> **来源**：Task 20 fix round 5 的 scoped 复审（verifier）—— **FAIL**（范围仅限 fix round 5；
+> 实现本身无功能缺陷）。0 Critical，但有 **1 条 Important + 2 条 Minor + 6 条 Nit**。
+> 控制器已**独立复现全部**（自己的变异脚本 + 中性路径对照），结论与评审方一致。
+
+**fix round 5 做对了一件重要事**：`runKernel` 层的 argv 通道真的被钉住了
+（评审方独立复现「先红后绿」：修复前 7 组全漏过 → 修复后全捕获）。
+但**计划自己的验收标准未达成**，且 round-4 那条 Important **没闭合**。
+
+---
+
+**Important 1（headline）：默认内核工厂（`server.mjs:512-513`）这一层仍然零护栏。**
+
+fix round 5 新增的 `the kernel subprocess argv carries exactly the host db path`
+**直接调 `runKernel` 并写死 args** ⇒ 它**从不经过默认工厂** ⇒
+「工厂往 args 塞 / 改写 `--db`」这类变异 **68/68 全绿**。
+
+控制器**独立复现**（3 组全漏过）：
+
+| # | 变异 | 结果 |
+|---|---|---|
+| F1 | 默认工厂往 args **末尾**塞一个插件目录的 `--db` | **exit 0 漏过** |
+| F2 | 默认工厂把 args 里的 `--db` **值**改成插件目录 | **exit 0 漏过** |
+| F3 | 默认工厂把 args 里的 `--db` 换成**空串** | **exit 0 漏过** |
+
+评审方用**真实 Python 内核 + `start(context)` 不传 deps** 实测：
+**DB 真落进插件包目录**、宿主 dataDir 里没有库 —— 危害与 round-4 的 Important 完全相同。
+
+**根因**：修法选错了**位置**。fix round 5 把断言加在「直接调 `runKernel`」的测试里，
+而**默认工厂那条测试（`the default kernel factory hands the host context to the kernel unchanged`）
+本来就已经抓到了 `captured[0].argv`** —— 只差一行 `--db` 断言。
+
+> **盲区家族（第五次）**：fix round 1 锚在「调用点**字面量**」→ round 2 锚在「调用点**入参**」→
+> round 3 锚在「**默认实现**」→ round 4 锚在「`handleRoute` 层的 **args**」→
+> round 5 锚在「`runKernel` 直调的 **argv**」—— 每次都差一层。
+> **本轮把断言补在「默认工厂 → spawnFn」这条路径上**：
+> 它是**生产路径**（宿主不传 `deps` 时走的就是它），
+> 且 `handleRoute` / 默认工厂 / `runKernel` 三层的 argv **都在 spawnFn 边界汇聚** ⇒ 一次补全，三层同堵。
+
+**Minor 1 —— fix round 5 把 Minor 1 的判据改窄了（覆盖回退）**：
+新判据只排除「**恰好等于插件根**」，而插件根**下面**的 `agaistock.db`
+（内核真正会写的那个文件）从「修复前被抓」变成「修复后漏过」。
+控制器实测：H8（`dbPath` 默认值 = 插件根下面的 `agaistock.db`）→ **exit 0 漏过**。
+
+**Minor 2 —— 控制器 D3 变异的参数位置写错**：
+把数组塞进了 `context` 位 ⇒ `spawnFn` 变成字符串 ⇒ `TypeError` ⇒
+**500 !== 200 的崩溃型假捕获**（argv 里根本没有 `--db`）。
+控制器已复核：D3-BAD 捕获但红的原因不是护栏；D3-GOOD（数组放 args 位）→ **漏过**。
+
+**Minor 3 —— 草稿守卫只观测宿主给的 pluginRoot**：
+写进**模块常量 `PLUGIN_ROOT`**（生产里就是安装目录）—— 控制器实测 **exit 1 被捕获**，
+⇒ **这条不成立**，无需修。
+
+**Nit**：① 设计文档「四层」却列 5 项（计划里同样写错）；② argv 前缀 `-S` / `-m agaistock.cli` /
+解释器零护栏；③ 计划与新测试注释里「任何上游层都躲不掉」被证伪；④ 控制器 D1/E1 是同一处变异；
+⑤ `draftDir` 回落分支仍无人守；⑥ 测试名与断言方向相反那条未改。
+
+---
+
+**修法（很小）：把 argv 的 `--db` 断言补到**默认内核工厂**那条测试里 —— 那里已经抓到 argv。**
+
+- 在 `the default kernel factory hands the host context to the kernel unchanged` 末尾补：
+  收集 argv 里**所有** `--db` 的取值（`argparse` 取最后一个，只看第一个会被绕过），
+  断言它们**恰好等于**宿主给的 `join(dataDir, 'agaistock.db')`。
+- 修 Minor 1：判据改成同时排除「恰好等于插件根」**和**「插件根下面的文件」。
+- 修控制器的 D3 变异写法（把数组放 args 位，不是 context 位）。
+- 文档：把「四层」改成**准确的层数**，并把「任何上游层都躲不掉」这句**改掉**（它被证伪了）。
+
+**Files:**
+- Modify: `miniapps/agaistock/test/api.test.mjs`
+- Modify: `docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md`
+- Modify: `docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md`
+
+> ⚠️ **本轮不改 `server.mjs`** —— 实现本身**正确**
+> （评审方实测未改动实现上所有路径参数都对；本轮唯一的问题是护栏**位置**选错）。
+
+**Interfaces:**
+- Consumes: 无（只加断言 + 修判据 + 文档）
+- Produces: 无（对外契约不变）
+
+- [ ] **Step 1: 补断言 + 修判据（`api.test.mjs`）**
+
+**1a) 顶部 import 补 `sep`**：
+
+```javascript
+import { join, sep } from 'node:path';
+```
+
+**1b) 在**默认内核工厂**那条测试末尾补 argv 断言**：
+
+```javascript
+  assert.ok(captured.length > 0, '生产路径必须真的 spawn 了内核');
+  assert.equal(captured[0].env.AGAISTOCK_DATA_DIR, dataDir);
+  assert.equal(captured[0].env.AGAISTOCK_DB, join(dataDir, 'agaistock.db'));
+  assert.equal(captured[0].env.PYTHONPATH, join(pluginRoot, 'src'));
+  assert.equal(captured[0].cwd, pluginRoot);
+  // ⚠️ **argv 也要断言** —— Python 侧 `_default_db()` 是 **argv 优先于 env**
+  //（src/agaistock/cli.py:26-32）⇒ env 对了不代表 DB 落点对。
+  // 这里是**默认内核工厂**这条路径（宿主不传 deps 时走的就是它），
+  // 所以工厂往 args 里塞/改写 `--db` 也必须被抓到。
+  // 收集 argv 里**所有** --db 的取值（argparse 取最后一个，只看第一个会被绕过）。
+  const dbValues = [];
+  captured[0].argv.forEach((value, index) => {
+    if (captured[0].argv[index - 1] === '--db') dbValues.push(value);
+  });
+  assert.deepEqual(
+    dbValues,
+    [join(dataDir, 'agaistock.db')],
+    `默认内核工厂递给内核的 --db 必须是宿主给的路径，实际 ${JSON.stringify(dbValues)}`,
+  );
+});
+```
+
+> **为什么这条是终态**：`handleRoute` 的 args → 默认工厂 → `runKernel` → **spawnFn**，
+> 三层的 argv **都在 spawnFn 边界汇聚** ⇒ 在这里断言 argv，一次堵住三层。
+
+**1c) 修 Minor 1 的判据**（`the kernel db path never falls back to the plugin dir`）：
+
+```javascript
+  // ⚠️ 不能只排除「恰好等于插件根」—— 插件根**下面**的 agaistock.db 也要排除
+  // （那才是内核真正会写的那个文件）。
+  // 也不能用 `!value.includes('agaistock')` —— 那依赖**仓库目录名恰好含该子串**。
+  const pluginRoot = join(import.meta.dirname, '..');
+  const value = calls[0][dbIdx + 1];
+  assert.ok(
+    value !== pluginRoot && !value.startsWith(pluginRoot + sep),
+    `没给 dbPath 时不许回落到插件目录，实际 ${value}`,
+  );
+```
+
+- [ ] **Step 2: 文档订正**
+
+1. **设计文档 §16.4**：那条护栏清单 —— 把「**四层**行为护栏」改成**准确的层数**，
+   并把「**任何上游层（`handleRoute`、默认内核工厂、`runKernel` 自身）的动手脚都躲不掉**」
+   这句**改掉**（它被 F1/F2/F3 证伪了）。准确表述：
+   「护栏落在 **`spawnFn` 边界**（内核子进程实际收到的 env 与 argv）——
+   `handleRoute` / 默认内核工厂 / `runKernel` 三层的路径参数**都在这里汇聚**；
+   但**再往下的层**（解释器路径、argv 前缀）尚无护栏」。
+2. **计划 fix round 2 小节**顶部横幅的「**四处**盲区已补」→ 改成「**五处**」，
+   并把「**断言要落在 `runKernel` 的 `spawnFn` 边界**」改成
+   「**断言要落在默认内核工厂 → `spawnFn` 这条路径上**（生产路径，且三层 argv 在此汇聚）」。
+3. **计划 fix round 5 小节**：加一句「本小节**已被 fix round 6 补充** ——
+   新测试**直接调 `runKernel`、绕过了默认工厂** ⇒ 工厂层零护栏；
+   fix round 6 把 argv 断言补到**默认工厂那条路径**上」。
+
+- [ ] **Step 3: 跑全量测试 + 加固后的变异脚本**
+
+```bash
+python -m unittest discover -s tests -t .
+node --test "miniapps/agaistock/test/*.test.mjs"
+node --check miniapps/agaistock/miniapp/node/server.mjs
+node tools\check-spec.mjs docs\superpowers\plans\2026-11-24-reviewer-layer-and-chanlun-reviewer.md --external docs\superpowers\specs\2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md --external docs\superpowers\specs\2026-11-24-stock-review-app-architecture.md
+```
+
+**封闭性验证（必做）**：
+
+```bash
+$env:AGAISTOCK_DATA_DIR='D:\ambient\host\data'; node --test "miniapps/agaistock/test/*.test.mjs"
+```
+
+**中性路径验证（必做）**：复制到**不含 `agaistock` 子串**的目录 → 必须**仍然全绿**，
+且「dbPath 默认值 = 插件根下面的 `agaistock.db`」必须**被抓到**。
+
+**变异验证（必做）**：控制器会提供 `.tmp\task20-fix6\mutations.py`，
+它**修正了 D3 的参数位置**（数组放 args 位，不是 context 位），
+并新增 F1/F2/F3 三组「默认工厂层」变异。
+
+**预期**：这 4 组对着**修复前**的实现必须**漏过**、对着**修复后**必须**捕获**。
+
+> 控制器已预验证过这个方案（`.tmp\task20-fix6\preverify.py`）：
+> **阶段 1（当前实现）F1/F2/F3/H8 漏过；阶段 2（加上新断言）6 组全部捕获、0 漏过。**
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add miniapps/agaistock/test/api.test.mjs docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
+git commit -m "test: assert the kernel argv on the default factory path" -- miniapps/agaistock/test/api.test.mjs docs/superpowers/plans/2026-11-24-reviewer-layer-and-chanlun-reviewer.md docs/superpowers/specs/2026-11-24-reviewer-layer-and-chanlun-reviewer-design.md
+```
+
+> **不要用 `git add -A`**（Global Constraint 14）。
+> 本轮**不改 `server.mjs`、不改 `src/agaistock/**`**。
+
+---
+
 ---
 
 ## Appendix A: 常用命令速查
